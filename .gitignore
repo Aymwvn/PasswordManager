@@ -1,0 +1,22 @@
+# Secrets / vaults - NEVER commit
+*.vault
+vault.bin
+.pyvault/
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# OS / IDE
+Thumbs.db
+.vscode/
+.idea/
