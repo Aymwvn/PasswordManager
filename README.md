@@ -8,9 +8,9 @@ No cloud, no account, no telemetry.
 - **KDF:** Argon2id (64 MiB, t=3, p=4 by default; parameters stored in the vault header)
 - **Encryption:** AES-256-GCM, fresh random nonce on every save, header authenticated as AAD
 - **Storage:** one encrypted file, written atomically, `0600` permissions on POSIX
-- **Interfaces:** CLI today; hardened localhost web UI on the roadmap
+- **Interfaces:** CLI and a local web UI (loopback only)
 
-> Status: early development (Phase 1 of 4). Not audited, so don't trust it with your only copy
+> Status: early development (Phase 2 of 4). Not audited, so don't trust it with your only copy
 > of anything important yet.
 
 ## Install
@@ -19,10 +19,36 @@ No cloud, no account, no telemetry.
 git clone https://github.com/Aymwvn/PasswordManager.git
 cd PasswordManager
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[clipboard]"
+pip install -e ".[clipboard,ui]"
 ```
 
-## Usage
+## Web UI
+
+```bash
+pm ui                      # opens http://localhost:8765
+pm ui --auto-lock 120      # lock after 2 idle minutes
+pm ui --port 9000 --no-browser
+```
+
+Create or unlock the vault, search, add/edit/delete entries, generate passwords with a
+strength meter, copy a password (the clipboard is cleared after 15 s), and auto-lock on idle.
+
+### UI security model (current)
+
+| Threat | Mitigation |
+|---|---|
+| Other machines reaching the UI | Server refuses to bind anything but loopback |
+| DNS rebinding | `Host` header allow-list (`localhost:PORT`, `127.0.0.1:PORT`) |
+| Cross-site request forgery | `Origin` check on writes + `SameSite=Strict` cookie |
+| Session theft / replay | Random 256-bit token, `HttpOnly` cookie, rotated on every unlock |
+| Walking away from the screen | Idle auto-lock on the server (status polling does not extend it) |
+| XSS via vault data | DOM-only rendering (no HTML strings), strict CSP (`script-src 'self'`), no inline JS/CSS |
+| Info leaks | `no-store` caching, `Referrer-Policy: no-referrer`, no `/docs` or OpenAPI |
+
+Planned in Phase 3: CSRF tokens, unlock rate limiting, API fuzzing, a self-pentest write-up,
+and a written threat model.
+
+## CLI
 
 ```bash
 pm init                                  # create a vault
@@ -50,8 +76,8 @@ bandit -r src
 ## Roadmap
 
 - [x] Phase 1: core library, versioned vault format, CLI, tests, CI
-- [ ] Phase 2: web UI (FastAPI + frontend)
-- [ ] Phase 3: UI hardening (CSRF, Host/Origin checks, CSP, rate limiting, auto-lock)
+- [x] Phase 2: local web UI (FastAPI + vanilla JS), auto-lock, Host/Origin checks, CSP
+- [ ] Phase 3: UI hardening (CSRF tokens, rate limiting, API fuzzing, self-pentest write-up)
 - [ ] Phase 4: TOTP, breach check (HIBP k-anonymity), threat model, signed releases
 
 ## License

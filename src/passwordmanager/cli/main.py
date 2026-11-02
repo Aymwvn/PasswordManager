@@ -145,6 +145,23 @@ def cmd_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    try:
+        from passwordmanager.ui.server import run
+    except ImportError:
+        print('error: UI dependencies missing. Install with: pip install -e ".[ui]"',
+              file=sys.stderr)
+        return 1
+    run(
+        _vault_path(args),
+        host=args.host,
+        port=args.port,
+        auto_lock_seconds=args.auto_lock,
+        open_browser=not args.no_browser,
+    )
+    return 0
+
+
 def cmd_gen(args: argparse.Namespace) -> int:
     pw = generate_password(args.length, symbols=not args.no_symbols)
     print(pw)
@@ -199,6 +216,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name")
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(func=cmd_delete)
+
+    s = sub.add_parser("ui", help="start the local web UI (loopback only)")
+    s.add_argument("--host", default="127.0.0.1", help="127.0.0.1, localhost or ::1 only")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--auto-lock", type=int, default=300, metavar="SECONDS",
+                   help="lock after this many idle seconds (default 300)")
+    s.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
+    s.set_defaults(func=cmd_ui)
 
     s = sub.add_parser("gen", help="generate a password (no vault needed)")
     s.add_argument("-l", "--length", type=int, default=20)

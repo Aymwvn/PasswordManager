@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "passwordmanager"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local, encrypted password manager. Argon2id + AES-256-GCM, CLI and hardened web UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,11 @@ dependencies = [
 
 [project.optional-dependencies]
 clipboard = ["pyperclip>=1.8"]
-dev = ["pytest>=8", "ruff>=0.5", "bandit>=1.7", "pip-audit>=2.7", "pyperclip>=1.8"]
+ui = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = [
+    "pytest>=8", "ruff>=0.5", "bandit>=1.7", "pip-audit>=2.7",
+    "pyperclip>=1.8", "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27",
+]
 
 [project.scripts]
 passwordmanager = "passwordmanager.cli.main:main"
@@ -23,6 +27,9 @@ pm = "passwordmanager.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+passwordmanager = ["ui/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -33,3 +40,6 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Cookie"]
