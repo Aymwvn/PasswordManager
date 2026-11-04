@@ -176,6 +176,7 @@ def create_app(
 
     # No /docs, /redoc or /openapi.json: less surface, nothing to leak.
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.session = state  # lets the desktop shell lock the vault (e.g. on minimize)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):

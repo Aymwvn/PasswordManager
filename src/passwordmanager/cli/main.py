@@ -162,6 +162,22 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_app(args: argparse.Namespace) -> int:
+    try:
+        from passwordmanager.app import run_app
+
+        run_app(
+            _vault_path(args),
+            auto_lock_seconds=args.auto_lock,
+            lock_on_minimize=not args.no_lock_on_minimize,
+        )
+    except ImportError as exc:
+        print(f'error: missing dependency ({exc.name}). Install: pip install -e ".[app]"',
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_gen(args: argparse.Namespace) -> int:
     pw = generate_password(args.length, symbols=not args.no_symbols)
     print(pw)
@@ -224,6 +240,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="lock after this many idle seconds (default 300)")
     s.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     s.set_defaults(func=cmd_ui)
+
+    s = sub.add_parser("app", help="open the desktop app (native window)")
+    s.add_argument("--auto-lock", type=int, default=300, metavar="SECONDS")
+    s.add_argument("--no-lock-on-minimize", action="store_true")
+    s.set_defaults(func=cmd_app)
 
     s = sub.add_parser("gen", help="generate a password (no vault needed)")
     s.add_argument("-l", "--length", type=int, default=20)

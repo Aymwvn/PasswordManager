@@ -8,7 +8,7 @@ No cloud, no account, no telemetry.
 - **KDF:** Argon2id (64 MiB, t=3, p=4 by default; parameters stored in the vault header)
 - **Encryption:** AES-256-GCM, fresh random nonce on every save, header authenticated as AAD
 - **Storage:** one encrypted file, written atomically, `0600` permissions on POSIX
-- **Interfaces:** CLI and a local web UI (loopback only)
+- **Interfaces:** desktop app (native window), CLI, and a local web UI (loopback only)
 
 > Status: early development (Phase 2 of 4). Not audited, so don't trust it with your only copy
 > of anything important yet.
@@ -19,10 +19,30 @@ No cloud, no account, no telemetry.
 git clone https://github.com/Aymwvn/PasswordManager.git
 cd PasswordManager
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[clipboard,ui]"
+pip install -e ".[clipboard,app]"
 ```
 
-## Web UI
+## Desktop app
+
+```bash
+pm app                          # native window, no browser tab
+pm app --auto-lock 120
+pm app --no-lock-on-minimize
+```
+
+The window is the same UI as below, hosted on a random loopback port that changes on every
+launch. The vault locks automatically when the window is minimized, and when the app closes.
+
+### Build a Windows `.exe`
+
+```bat
+packaging\build_windows.bat
+```
+
+Output: `dist\PasswordManager\PasswordManager.exe` (needs the WebView2 runtime, preinstalled on
+Windows 11). Unsigned builds may trigger a SmartScreen warning.
+
+## Web UI (browser)
 
 ```bash
 pm ui                      # opens http://localhost:8765
@@ -77,6 +97,7 @@ bandit -r src
 
 - [x] Phase 1: core library, versioned vault format, CLI, tests, CI
 - [x] Phase 2: local web UI (FastAPI + vanilla JS), auto-lock, Host/Origin checks, CSP
+- [x] Phase 2b: desktop app (pywebview) + Windows build script
 - [ ] Phase 3: UI hardening (CSRF tokens, rate limiting, API fuzzing, self-pentest write-up)
 - [ ] Phase 4: TOTP, breach check (HIBP k-anonymity), threat model, signed releases
 

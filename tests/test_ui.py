@@ -191,3 +191,10 @@ def test_generate_endpoint(client):
 def test_run_refuses_non_loopback(tmp_path):
     with pytest.raises(ValueError):
         run(tmp_path / "v.bin", host="192.168.1.5")
+
+
+def test_session_hook_locks_vault(app, authed):
+    # The desktop shell uses this to lock when the window is minimized.
+    app.state.session.lock()
+    assert authed.get("/api/status").json()["unlocked"] is False
+    assert authed.get("/api/entries").status_code == 401

@@ -16,6 +16,8 @@ dependencies = [
 [project.optional-dependencies]
 clipboard = ["pyperclip>=1.8"]
 ui = ["fastapi>=0.110", "uvicorn>=0.29"]
+app = ["fastapi>=0.110", "uvicorn>=0.29", "pywebview>=5"]
+build = ["pyinstaller>=6", "pillow>=10"]
 dev = [
     "pytest>=8", "ruff>=0.5", "bandit>=1.7", "pip-audit>=2.7",
     "pyperclip>=1.8", "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27",
@@ -24,6 +26,9 @@ dev = [
 [project.scripts]
 passwordmanager = "passwordmanager.cli.main:main"
 pm = "passwordmanager.cli.main:main"
+
+[project.gui-scripts]
+pm-app = "passwordmanager.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
