@@ -1,16 +1,20 @@
 """Local web UI backend (FastAPI). Single user, single vault, loopback only.
 
-Security basics enforced here (Phase 3 hardens further):
-  * Host header allow-list          -> blocks DNS-rebinding
-  * Origin check on writes          -> blocks cross-site request forgery from other origins
-  * Random per-unlock session token -> HttpOnly + SameSite=Strict cookie, rotated on every unlock
-  * Idle auto-lock                  -> watchdog thread of the event loop + lazy check per request
+Defences (see docs/THREAT_MODEL.md and docs/SELF_PENTEST.md):
+  * Host header allow-list              -> blocks DNS rebinding
+  * Origin + Sec-Fetch-Site on writes   -> blocks cross-site requests from browsers
+  * Per-session CSRF token (header)     -> required on every authenticated write, even w/o Origin
+  * Random per-unlock session token     -> HttpOnly + SameSite=Strict cookie, rotated on unlock
+  * Unlock throttling                   -> exponential lockout after repeated failures (429)
+  * Request body cap                    -> 413 before big bodies are buffered/parsed
+  * Idle auto-lock                      -> watchdog task + lazy check per request
   * Strict CSP, no-store caching, API docs disabled
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import secrets
 import threading
 import time
@@ -45,7 +49,10 @@ from passwordmanager.core.vault import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 COOKIE_NAME = "pm_session"
+CSRF_HEADER = "x-csrf-token"
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+MAX_BODY_BYTES = 128 * 1024  # largest legitimate request is well under 100 KB
 
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
@@ -102,11 +109,50 @@ def _summary(entry: Entry) -> dict:
     }
 
 
+# ---- unlock throttling ---------------------------------------------------------------------
+
+
+class AttemptLimiter:
+    """Exponential lockout for failed unlocks: 5s, 10s, 20s ... capped at 15 min.
+
+    The 3rd consecutive failure starts the lockout. In-memory on purpose: it protects the UI
+    path (shoulder surfers, other local users, scripts). Offline attacks on the vault *file*
+    are what Argon2 is for. Restarting the app resets the counter.
+    """
+
+    FREE_ATTEMPTS = 3
+    BASE_DELAY = 5
+    MAX_DELAY = 15 * 60
+
+    def __init__(self, clock: Callable[[], float]):
+        self.clock = clock
+        self.mutex = threading.Lock()
+        self.failures = 0
+        self.blocked_until = 0.0
+
+    def blocked_for(self) -> int:
+        with self.mutex:
+            return max(0, math.ceil(self.blocked_until - self.clock()))
+
+    def record_failure(self) -> None:
+        with self.mutex:
+            self.failures += 1
+            if self.failures >= self.FREE_ATTEMPTS:
+                exponent = self.failures - self.FREE_ATTEMPTS
+                delay = min(self.BASE_DELAY * 2**exponent, self.MAX_DELAY)
+                self.blocked_until = self.clock() + delay
+
+    def record_success(self) -> None:
+        with self.mutex:
+            self.failures = 0
+            self.blocked_until = 0.0
+
+
 # ---- session state -------------------------------------------------------------------------
 
 
 class SessionState:
-    """Holds the (single) unlocked vault and the current session token."""
+    """Holds the (single) unlocked vault, the session token and its CSRF token."""
 
     def __init__(self, vault_path: Path, auto_lock_seconds: int, clock: Callable[[], float]):
         self.vault = Vault(vault_path)
@@ -114,23 +160,31 @@ class SessionState:
         self.clock = clock
         self.mutex = threading.RLock()
         self.token: str | None = None
+        self.csrf: str | None = None
         self.last_activity = 0.0
 
-    def start(self) -> str:
+    def start(self) -> tuple[str, str]:
+        """New session: fresh cookie token and CSRF token on every unlock."""
         with self.mutex:
-            self.token = secrets.token_urlsafe(32)  # new token on every unlock
+            self.token = secrets.token_urlsafe(32)
+            self.csrf = secrets.token_urlsafe(32)
             self.last_activity = self.clock()
-            return self.token
+            return self.token, self.csrf
 
     def lock(self) -> None:
         with self.mutex:
             self.vault.lock()
             self.token = None
+            self.csrf = None
 
     def check_idle(self) -> None:
         with self.mutex:
             if self.token is not None and self.clock() - self.last_activity > self.ttl:
                 self.lock()
+
+    def touch(self) -> None:
+        with self.mutex:
+            self.last_activity = self.clock()
 
     def authenticate(self, cookie: str | None, touch: bool = True) -> bool:
         with self.mutex:
@@ -140,11 +194,68 @@ class SessionState:
             if not secrets.compare_digest(self.token.encode(), cookie.encode()):
                 return False
             if touch:
-                self.last_activity = self.clock()
+                self.touch()
             return True
+
+    def csrf_ok(self, supplied: str | None) -> bool:
+        with self.mutex:
+            if not (self.csrf and supplied):
+                return False
+            return secrets.compare_digest(self.csrf.encode(), supplied.encode())
 
     def seconds_left(self) -> int:
         return max(0, int(self.ttl - (self.clock() - self.last_activity)))
+
+
+# ---- body size cap (pure ASGI so it also covers chunked uploads) ---------------------------
+
+
+class BodyLimitMiddleware:
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def _reject(self, scope, receive, send) -> None:
+        response = JSONResponse(
+            {"detail": "request too large"}, status_code=413, headers=SECURITY_HEADERS
+        )
+        await response(scope, receive, send)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        for key, value in scope["headers"]:
+            if key == b"content-length":
+                try:
+                    too_big = int(value) > self.max_bytes
+                except ValueError:
+                    too_big = True
+                if too_big:
+                    await self._reject(scope, receive, send)
+                    return
+
+        total = 0
+        rejected = False
+
+        async def limited_receive():
+            nonlocal total, rejected
+            if rejected:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > self.max_bytes:
+                    rejected = True
+                    await self._reject(scope, receive, send)
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message):
+            if not rejected:  # after a 413 the app's own (error) response is dropped
+                await send(message)
+
+        await self.app(scope, limited_receive, guarded_send)
 
 
 # ---- app factory ---------------------------------------------------------------------------
@@ -159,6 +270,7 @@ def create_app(
     clock: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     state = SessionState(Path(vault_path), auto_lock_seconds, clock)
+    limiter = AttemptLimiter(clock)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -182,21 +294,31 @@ def create_app(
     async def guard(request: Request, call_next):
         if request.headers.get("host", "") not in allowed_hosts:
             return JSONResponse({"detail": "invalid host"}, status_code=400)
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if request.method not in SAFE_METHODS:
             origin = request.headers.get("origin")
             if origin is not None and urlparse(origin).netloc not in allowed_hosts:
                 return JSONResponse({"detail": "cross-origin request blocked"}, status_code=403)
+            site = request.headers.get("sec-fetch-site")  # sent by every modern browser
+            if site is not None and site not in ("same-origin", "none"):
+                return JSONResponse({"detail": "cross-site request blocked"}, status_code=403)
         response = await call_next(request)
         response.headers.update(SECURITY_HEADERS)
         return response
+
+    app.add_middleware(BodyLimitMiddleware, max_bytes=MAX_BODY_BYTES)  # outermost
 
     @app.exception_handler(VaultError)
     async def vault_error(_: Request, exc: VaultError):
         return JSONResponse({"detail": str(exc)}, status_code=_ERROR_STATUS.get(type(exc), 400))
 
-    def require_session(pm_session: str | None = Cookie(default=None)) -> None:
-        if not state.authenticate(pm_session):
+    def require_session(request: Request, pm_session: str | None = Cookie(default=None)) -> None:
+        if not state.authenticate(pm_session, touch=False):
             raise HTTPException(status_code=401, detail="vault is locked")
+        if request.method not in SAFE_METHODS and not state.csrf_ok(
+            request.headers.get(CSRF_HEADER)
+        ):
+            raise HTTPException(status_code=403, detail="missing or invalid CSRF token")
+        state.touch()  # only a fully valid request counts as activity
 
     authed = [Depends(require_session)]
 
@@ -210,23 +332,36 @@ def create_app(
             "vault_exists": state.vault.path.exists(),
             "unlocked": ok,
             "seconds_left": state.seconds_left() if ok else None,
+            "csrf_token": state.csrf if ok else None,  # only ever given to the cookie holder
         }
 
     @app.post("/api/init")
     def init(body: MasterIn, response: Response):
         with state.mutex:
             state.vault = Vault.create(state.vault.path, body.master_password, kdf_params)
-            token = state.start()
+            token, csrf = state.start()
         _set_cookie(response, token)
-        return {"unlocked": True}
+        return {"unlocked": True, "csrf_token": csrf}
 
     @app.post("/api/unlock")
     def unlock(body: MasterIn, response: Response):
+        wait = limiter.blocked_for()
+        if wait > 0:  # reject before doing any Argon2 work
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many failed attempts, try again in {wait}s",
+                headers={"Retry-After": str(wait)},
+            )
         with state.mutex:
-            state.vault.unlock(body.master_password)
-            token = state.start()
+            try:
+                state.vault.unlock(body.master_password)
+            except InvalidPassword:
+                limiter.record_failure()
+                raise
+            limiter.record_success()
+            token, csrf = state.start()
         _set_cookie(response, token)
-        return {"unlocked": True}
+        return {"unlocked": True, "csrf_token": csrf}
 
     @app.post("/api/lock", dependencies=authed)
     def lock():

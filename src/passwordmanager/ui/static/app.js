@@ -14,6 +14,7 @@
   let pollTimer = null;
   let searchTimer = null;
   let lastPing = 0;
+  let csrfToken = null; // lives in memory only; sent on every write as X-CSRF-Token
 
   // ---- helpers ---------------------------------------------------------------------------
 
@@ -29,9 +30,12 @@
   }
 
   async function api(method, path, body) {
+    const headers = {};
+    if (body) headers["Content-Type"] = "application/json";
+    if (method !== "GET" && csrfToken) headers["X-CSRF-Token"] = csrfToken;
     const res = await fetch(`/api${path}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : {},
+      headers,
       body: body ? JSON.stringify(body) : undefined,
       credentials: "same-origin",
     });
@@ -116,6 +120,7 @@
 
   function lockUi(message) {
     clearInterval(pollTimer);
+    csrfToken = null;
     entries = [];
     selectedName = null;
     renderList();
@@ -134,7 +139,8 @@
     }
     $("auth-submit").disabled = true;
     try {
-      await api("POST", vaultExists ? "/unlock" : "/init", { master_password: pw });
+      const session = await api("POST", vaultExists ? "/unlock" : "/init", { master_password: pw });
+      csrfToken = session.csrf_token;
       await showApp();
     } catch (err) {
       $("auth-error").textContent = err.message;
@@ -164,6 +170,7 @@
     try {
       const st = await api("GET", "/status");
       if (!st.unlocked) { lockUi("Locked due to inactivity."); return; }
+      csrfToken = st.csrf_token;
       $("timer").textContent = `Auto-lock in ${fmtTime(st.seconds_left)}`;
     } catch {
       $("timer").textContent = "Server unreachable";
@@ -363,7 +370,7 @@
   (async () => {
     try {
       const st = await api("GET", "/status");
-      if (st.unlocked) await showApp();
+      if (st.unlocked) { csrfToken = st.csrf_token; await showApp(); }
       else showAuth(st.vault_exists);
     } catch (err) {
       document.body.textContent = `Cannot reach the local server: ${err.message}`;

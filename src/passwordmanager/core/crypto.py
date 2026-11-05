@@ -15,6 +15,7 @@ import os
 import struct
 from dataclasses import dataclass
 
+from argon2.exceptions import Argon2Error
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -29,9 +30,10 @@ TAG_LEN = 16
 _HEADER = struct.Struct(">4sBIII16s12s")
 HEADER_SIZE = _HEADER.size
 
-# Sanity bounds so a malicious vault file can't make us allocate absurd memory.
-_MAX_TIME = 20
-_MAX_MEMORY_KIB = 1024 * 1024  # 1 GiB
+# Sanity bounds: the header is attacker-controlled input (anyone can hand us a vault file), so
+# it must not be able to demand unreasonable CPU/RAM. Defaults are t=3, 64 MiB, p=4.
+_MAX_TIME = 10
+_MAX_MEMORY_KIB = 256 * 1024  # 256 MiB
 _MAX_PARALLELISM = 16
 
 
@@ -97,8 +99,8 @@ def parse_header(blob: bytes) -> Header:
         raise InvalidFormat(f"unsupported vault version {version}")
     if not (
         1 <= time_cost <= _MAX_TIME
-        and 8 <= memory_cost <= _MAX_MEMORY_KIB
         and 1 <= parallelism <= _MAX_PARALLELISM
+        and 8 * parallelism <= memory_cost <= _MAX_MEMORY_KIB  # Argon2 needs m >= 8*p
     ):
         raise InvalidFormat("vault has out-of-range KDF parameters")
     return Header(version, KdfParams(time_cost, memory_cost, parallelism), salt, nonce)
@@ -107,7 +109,10 @@ def parse_header(blob: bytes) -> Header:
 def decrypt(password: str, blob: bytes) -> tuple[bytes, bytes, Header]:
     """Returns (plaintext, derived_key, header). Raises DecryptionError on failure."""
     header = parse_header(blob)
-    key = derive_key(password, header.salt, header.params)
+    try:
+        key = derive_key(password, header.salt, header.params)
+    except Argon2Error as exc:  # belt and braces: never let a library error escape as a crash
+        raise InvalidFormat("vault has unusable KDF parameters") from exc
     try:
         plaintext = AESGCM(key).decrypt(header.nonce, blob[HEADER_SIZE:], blob[:HEADER_SIZE])
     except InvalidTag as exc:

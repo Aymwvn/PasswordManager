@@ -63,3 +63,25 @@ def test_absurd_kdf_params_rejected(fast_params):
     )
     with pytest.raises(crypto.InvalidFormat):
         crypto.parse_header(header + b"\x00" * 32)
+
+
+def _header(time_cost, memory, parallelism):
+    return crypto._HEADER.pack(
+        crypto.MAGIC, crypto.FORMAT_VERSION, time_cost, memory, parallelism, b"s" * 16, b"n" * 12
+    ) + b"\x00" * 32
+
+
+def test_kdf_memory_above_256_mib_rejected():  # F-A
+    with pytest.raises(crypto.InvalidFormat):
+        crypto.parse_header(_header(3, 256 * 1024 + 1, 4))
+    crypto.parse_header(_header(3, 256 * 1024, 4))  # the limit itself is fine
+
+
+def test_kdf_time_cost_above_ten_rejected():  # F-A
+    with pytest.raises(crypto.InvalidFormat):
+        crypto.parse_header(_header(11, 64 * 1024, 4))
+
+
+def test_memory_below_8x_parallelism_is_rejected_not_a_crash():  # F-B
+    with pytest.raises(crypto.InvalidFormat):
+        crypto.decrypt(PW, _header(1, 8, 2))
