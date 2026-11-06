@@ -320,3 +320,134 @@ def test_maximum_legitimate_entry_still_fits_under_the_cap(authed):
     entry = {"name": "n" * 200, "username": "u" * 500, "password": "p" * 1024,
              "url": "h" * 2000, "notes": "\u00e9" * 10_000}
     assert authed.post("/api/entries", json=entry).status_code == 201
+
+
+# ---- Phase 4: TOTP endpoint and opt-in breach check -------------------------------------------
+
+import threading  # noqa: E402
+
+from passwordmanager.core import breach  # noqa: E402
+
+RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+
+def test_totp_endpoint_returns_a_live_code(authed):
+    res = authed.post("/api/entries", json={**ENTRY, "totp": RFC_SECRET})
+    assert res.status_code == 201 and res.json()["has_totp"] is True
+    body = authed.get("/api/totp/github").json()
+    assert re.fullmatch(r"\d{6}", body["code"])
+    assert 1 <= body["seconds_remaining"] <= 30 and body["period"] == 30
+    assert authed.get("/api/entries/github").json()["totp"] == RFC_SECRET
+
+
+def test_totp_secret_never_appears_in_the_list_view(authed):
+    authed.post("/api/entries", json={**ENTRY, "totp": RFC_SECRET})
+    listing = authed.get("/api/entries").json()[0]
+    assert "totp" not in listing and listing["has_totp"] is True
+
+
+def test_totp_requires_a_session(client):
+    assert client.get("/api/totp/github").status_code == 401
+
+
+def test_totp_error_cases(authed):
+    authed.post("/api/entries", json=ENTRY)
+    assert authed.get("/api/totp/github").status_code == 404  # no secret configured
+    assert authed.get("/api/totp/missing").status_code == 404
+    bad = authed.post("/api/entries", json={**ENTRY, "name": "bad", "totp": "not base32!!"})
+    assert bad.status_code == 422
+    assert [e["name"] for e in authed.get("/api/entries").json()] == ["github"]
+
+
+def test_totp_can_be_cleared_through_update(authed):
+    authed.post("/api/entries", json={**ENTRY, "totp": RFC_SECRET})
+    assert authed.put("/api/entries/github", json={"totp": ""}).json()["has_totp"] is False
+    assert authed.get("/api/totp/github").status_code == 404
+
+
+@pytest.fixture
+def breach_calls():
+    return []
+
+
+@pytest.fixture
+def breach_client(tmp_path, fast_params, clock, breach_calls):
+    def fetch(prefix):
+        breach_calls.append(prefix)
+        _, suffix = breach.sha1_parts("hunter2hunter2")
+        return f"{suffix}:42\r\nAAAAAAAAAAAAAAAA:1"
+
+    app = create_app(tmp_path / "v.bin", allowed_hosts={"testserver"}, kdf_params=fast_params,
+                     clock=clock, breach_fetcher=fetch)
+    client = TestClient(app)
+    token = client.post("/api/init", json={"master_password": MASTER}).json()["csrf_token"]
+    client.headers["X-CSRF-Token"] = token
+    return client
+
+
+def test_breach_check_sends_only_a_five_character_prefix(breach_client, breach_calls):
+    breach_client.post("/api/entries", json={"name": "a", "password": "hunter2hunter2"})
+    assert breach_client.post("/api/breach/a").json() == {"breached": True, "count": 42}
+    breach_client.post("/api/entries", json={"name": "b", "password": "a-different-one-77"})
+    assert breach_client.post("/api/breach/b").json() == {"breached": False, "count": 0}
+    assert len(breach_calls) == 2 and all(len(p) == 5 for p in breach_calls)
+
+
+def test_breach_check_needs_a_session_and_a_csrf_token(breach_client, breach_calls, app):
+    breach_client.post("/api/entries", json={"name": "a", "password": "hunter2hunter2"})
+    token = breach_client.headers.pop("X-CSRF-Token")
+    assert breach_client.post("/api/breach/a").status_code == 403  # a web page can't trigger it
+    assert breach_calls == []
+    assert TestClient(app).post("/api/breach/a").status_code == 401
+    breach_client.headers["X-CSRF-Token"] = token
+
+
+def test_breach_check_errors(tmp_path, fast_params):
+    def offline(_prefix):
+        raise breach.BreachCheckError("could not reach the breach-check service")
+
+    app = create_app(tmp_path / "v.bin", allowed_hosts={"testserver"}, kdf_params=fast_params,
+                     breach_fetcher=offline)
+    client = TestClient(app)
+    client.headers["X-CSRF-Token"] = client.post(
+        "/api/init", json={"master_password": MASTER}).json()["csrf_token"]
+    client.post("/api/entries", json={"name": "a", "password": "pw"})
+    client.post("/api/entries", json={"name": "empty"})
+    res = client.post("/api/breach/a")
+    assert res.status_code == 502 and "could not reach" in res.json()["detail"]
+    assert client.post("/api/breach/empty").status_code == 422
+    assert client.post("/api/breach/missing").status_code == 404
+
+
+def test_vault_stays_responsive_while_a_breach_lookup_is_in_flight(
+    tmp_path, fast_params
+):
+    started, release = threading.Event(), threading.Event()
+
+    def slow_fetch(_prefix):
+        started.set()
+        release.wait(5)
+        return ""
+
+    app = create_app(tmp_path / "v.bin", allowed_hosts={"testserver"}, kdf_params=fast_params,
+                     breach_fetcher=slow_fetch)
+    main = TestClient(app)
+    token = main.post("/api/init", json={"master_password": MASTER}).json()["csrf_token"]
+    main.headers["X-CSRF-Token"] = token
+    main.post("/api/entries", json={"name": "a", "password": "pw"})
+    other = TestClient(app, headers={"X-CSRF-Token": token})
+    other.cookies.update(main.cookies)
+    worker = threading.Thread(target=lambda: other.post("/api/breach/a"))
+    worker.start()
+    try:
+        assert started.wait(5)
+        assert main.get("/api/entries").status_code == 200  # mutex is not held during the request
+    finally:
+        release.set()
+        worker.join(5)
+
+
+@pytest.mark.parametrize("name", ["a\nb", "\n"])
+def test_api_rejects_names_that_could_not_be_addressed_later(authed, name):  # F-E
+    assert authed.post("/api/entries", json={**ENTRY, "name": name}).status_code == 422
+    assert authed.get("/api/entries").json() == []

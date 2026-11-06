@@ -20,7 +20,8 @@ from argon2.low_level import Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-MAGIC = b"PMGR"
+MAGIC = b"PMGR"  # vault files
+EXPORT_MAGIC = b"PMEX"  # encrypted export files (.pmbak); the magic is part of the AAD
 FORMAT_VERSION = 1
 SALT_LEN = 16
 NONCE_LEN = 12
@@ -80,21 +81,23 @@ def derive_key(password: str, salt: bytes, params: KdfParams) -> bytes:
     )
 
 
-def encrypt(key: bytes, plaintext: bytes, salt: bytes, params: KdfParams) -> bytes:
+def encrypt(
+    key: bytes, plaintext: bytes, salt: bytes, params: KdfParams, magic: bytes = MAGIC
+) -> bytes:
     """Encrypt with a fresh random nonce. Returns header + ciphertext."""
     nonce = os.urandom(NONCE_LEN)
     header = _HEADER.pack(
-        MAGIC, FORMAT_VERSION, params.time_cost, params.memory_cost, params.parallelism, salt, nonce
+        magic, FORMAT_VERSION, params.time_cost, params.memory_cost, params.parallelism, salt, nonce
     )
     return header + AESGCM(key).encrypt(nonce, plaintext, header)
 
 
-def parse_header(blob: bytes) -> Header:
+def parse_header(blob: bytes, magic: bytes = MAGIC) -> Header:
     if len(blob) < HEADER_SIZE + TAG_LEN:
         raise InvalidFormat("file too short to be a vault")
-    magic, version, time_cost, memory_cost, parallelism, salt, nonce = _HEADER.unpack_from(blob)
-    if magic != MAGIC:
-        raise InvalidFormat("not a PasswordManager vault")
+    found, version, time_cost, memory_cost, parallelism, salt, nonce = _HEADER.unpack_from(blob)
+    if found != magic:
+        raise InvalidFormat("not the expected PasswordManager file type")
     if version != FORMAT_VERSION:
         raise InvalidFormat(f"unsupported vault version {version}")
     if not (
@@ -106,9 +109,9 @@ def parse_header(blob: bytes) -> Header:
     return Header(version, KdfParams(time_cost, memory_cost, parallelism), salt, nonce)
 
 
-def decrypt(password: str, blob: bytes) -> tuple[bytes, bytes, Header]:
+def decrypt(password: str, blob: bytes, magic: bytes = MAGIC) -> tuple[bytes, bytes, Header]:
     """Returns (plaintext, derived_key, header). Raises DecryptionError on failure."""
-    header = parse_header(blob)
+    header = parse_header(blob, magic)
     try:
         key = derive_key(password, header.salt, header.params)
     except Argon2Error as exc:  # belt and braces: never let a library error escape as a crash

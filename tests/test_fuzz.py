@@ -4,6 +4,7 @@ Safe = a clean VaultError / 4xx, never an unhandled exception or a 5xx, and a mo
 must never decrypt. Hypothesis shrinks any failure to a minimal reproducer.
 """
 
+import os
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
@@ -25,7 +26,8 @@ from passwordmanager.ui.server import create_app  # noqa: E402
 
 FAST = KdfParams(1, 8, 1)
 MASTER = "correct horse battery"
-FUZZ = settings(max_examples=60, deadline=None, suppress_health_check=list(HealthCheck))
+EXAMPLES = int(os.environ.get("PM_FUZZ_EXAMPLES", "60"))  # PM_FUZZ_EXAMPLES=1000 for a deep run
+FUZZ = settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=list(HealthCheck))
 
 
 def _valid_blob() -> bytes:
@@ -127,8 +129,8 @@ short_text = st.text(max_size=40)
 
 
 @FUZZ
-@given(name=st.text(min_size=1, max_size=40), username=short_text, password=short_text,
-       url=short_text, notes=short_text)
+@given(name=st.text(st.characters(blacklist_categories=("Cs", "Cc")), min_size=1, max_size=40),
+       username=short_text, password=short_text, url=short_text, notes=short_text)
 def test_entries_roundtrip_any_unicode(name, username, password, url, notes):
     entry = {"name": name, "username": username, "password": password, "url": url, "notes": notes}
     with tempfile.TemporaryDirectory() as tmp:
@@ -202,3 +204,101 @@ def test_random_csrf_tokens_never_pass(token):
         _, client = _session(tmp)  # valid cookie, but we override the CSRF header
         res = client.post("/api/entries", json={"name": "x"}, headers={"X-CSRF-Token": token})
         assert res.status_code == 403
+
+
+# ---- Phase 4 parsers: encrypted exports and CSV imports ---------------------------------------
+
+import csv  # noqa: E402
+import io  # noqa: E402
+
+from passwordmanager.core.portability import (  # noqa: E402
+    export_encrypted,
+    import_encrypted,
+    parse_csv,
+)
+from passwordmanager.core.vault import Entry, validate_entry_fields  # noqa: E402
+
+EXPORT_PW = "export password 123"
+
+
+def _valid_export() -> bytes:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "b.pmbak"
+        export_encrypted(path, [Entry("a", "u", "p" * 12, "https://x", "n", "JBSWY3DPEHPK3PXP")],
+                         EXPORT_PW, FAST)
+        return path.read_bytes()
+
+
+EXPORT_BLOB = _valid_export()
+EXPORT_MUTABLE = [i for i in range(len(EXPORT_BLOB)) if not 5 <= i <= 16]
+
+
+def _import_bytes(data: bytes):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "b.pmbak"
+        path.write_bytes(data)
+        return import_encrypted(path, EXPORT_PW)
+
+
+def test_baseline_export_imports():
+    assert _import_bytes(EXPORT_BLOB)[0].name == "a"
+
+
+@FUZZ
+@given(st.binary(max_size=400))
+def test_random_bytes_never_crash_the_export_importer(data):
+    with pytest.raises(VaultError):
+        _import_bytes(data)
+
+
+@FUZZ
+@given(index=st.sampled_from(EXPORT_MUTABLE), flip=st.integers(1, 255))
+def test_any_single_byte_change_in_an_export_is_detected(index, flip):
+    data = bytearray(EXPORT_BLOB)
+    data[index] ^= flip
+    with pytest.raises(VaultError):
+        _import_bytes(bytes(data))
+
+
+@FUZZ
+@given(st.integers(0, len(EXPORT_BLOB) - 1))
+def test_any_truncation_of_an_export_is_rejected(length):
+    with pytest.raises(VaultError):
+        _import_bytes(EXPORT_BLOB[:length])
+
+
+def _assert_clean(entries):
+    for entry in entries:
+        assert entry.name
+        validate_entry_fields(
+            name=entry.name, username=entry.username, password=entry.password,
+            url=entry.url, notes=entry.notes, totp=entry.totp,
+        )
+
+
+@FUZZ
+@given(st.text(max_size=600))
+def test_arbitrary_text_as_csv_never_crashes_and_never_yields_bad_entries(text):
+    try:
+        entries, _ = parse_csv(text)
+    except VaultError:
+        return
+    _assert_clean(entries)
+
+
+cell = st.text(max_size=700)
+
+
+@FUZZ
+@given(rows=st.lists(st.tuples(cell, cell, cell, cell, cell, cell), max_size=8))
+def test_structured_csv_with_hostile_cells_stays_within_limits(rows):
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["name", "url", "username", "password", "note", "login_totp"])
+    writer.writerows(rows)
+    try:
+        entries, _ = parse_csv(buffer.getvalue())
+    except VaultError:
+        return
+    _assert_clean(entries)
+    assert len(entries) <= len(rows)

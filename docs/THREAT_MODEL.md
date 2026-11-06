@@ -1,6 +1,6 @@
 # Threat model
 
-Scope: PasswordManager v0.3 (core library, CLI, local web UI, desktop shell).
+Scope: PasswordManager v0.4 (core library, CLI, local web UI, desktop shell).
 Status: self-reviewed, **not independently audited**.
 
 ## What we protect
@@ -21,6 +21,8 @@ Status: self-reviewed, **not independently audited**.
 | A4 | Shoulder surfer / unattended unlocked machine | Physical or visual access for a short time | Idle auto-lock (server side), lock on minimize (desktop), reveal-on-demand, clipboard auto-clear | `test_ui.py`, `test_app.py` |
 | A5 | Hands the user a malicious or corrupted vault file | Crafted header, truncated or bit-flipped file | Authenticated header (AAD), bounded KDF parameters, library errors mapped to clean errors | `test_fuzz.py`, `test_crypto.py` |
 | A6 | Malicious *content* inside an entry (e.g. imported data) | Tries to run script in the UI | DOM-only rendering (test bans HTML-string APIs), strict CSP with no inline script, only `http(s)` URLs become links | `test_ui.py::test_frontend_never_uses_innerhtml` |
+| A7 | Hands the user a malicious import file (tampered `.pmbak`, CSV from a compromised source) | Crafted fields, huge files, line breaks and control characters, bad TOTP secrets | Separate authenticated `PMEX` container, size caps (50 MiB / 10 MiB / 100 000 rows), strict types, field limits, control characters rejected or cleaned, all-or-nothing import that renames instead of overwriting | `test_portability.py`, `test_fuzz.py` |
+| A8 | Network observer, or the breach-check service itself | Sees or manipulates the Have I Been Pwned lookup | Opt-in only (explicit click or `--breach`, with a confirmation), only a 5-hex-char SHA-1 prefix is sent, response padding requested, HTTPS with certificate verification, redirects refused, 2 MB response cap, 8 s timeout, `POST` + CSRF so a web page can't trigger it | `test_breach.py`, `test_ui.py` |
 
 ## Out of scope / known limitations
 
@@ -45,3 +47,16 @@ These are real limits, not oversights. Where a mitigation exists but is partial,
 8. **Weak master passwords.** We enforce length only, not quality.
 9. **Single user, single vault, no sync, no recovery.** Forgetting the master password means the
    data is gone by design.
+10. **TOTP in the same vault is one factor, not two.** Anyone who unlocks the vault gets the password
+    *and* the 2FA code. That trades some security for convenience. Keep the second factor for
+    high-value accounts (email, banking, the master-password recovery path) on a separate device
+    or a hardware key.
+11. **Exports and imports.** An encrypted export is only as strong as its export password; anyone
+    holding the file can attack it offline. There is deliberately no plaintext export. CSV *imports*
+    leave a plaintext file on disk: delete it, but deletion does not guarantee erasure on SSDs,
+    backups or cloud-synced folders.
+12. **Breach check.** The remaining leak is the fact that you queried the service (IP, timing)
+    plus the 5-character prefix. A malicious or compromised response can only produce a false
+    "not found" or a false alarm; it cannot make the app reveal the password.
+13. **Password audit is heuristic** (pool-size entropy, repetition, reuse). It knows nothing about
+    dictionary words or leaked patterns, so "not flagged" is not proof of strength.

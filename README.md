@@ -8,9 +8,10 @@ No cloud, no account, no telemetry.
 - **KDF:** Argon2id (64 MiB, t=3, p=4 by default; parameters stored in the vault header)
 - **Encryption:** AES-256-GCM, fresh random nonce on every save, header authenticated as AAD
 - **Storage:** one encrypted file, written atomically, `0600` permissions on POSIX
+- **Extras:** 2FA (TOTP) codes, password audit, opt-in breach check (k-anonymity), encrypted export/import
 - **Interfaces:** desktop app (native window), CLI, and a local web UI (loopback only)
 
-> Status: early development (Phase 3 of 4). Not audited, so don't trust it with your only copy
+> Status: v0.4 (all four planned phases done), still unaudited. Not audited, so don't trust it with your only copy
 > of anything important yet.
 
 ## Install
@@ -66,6 +67,8 @@ strength meter, copy a password (the clipboard is cleared after 15 s), and auto-
 | Hostile vault files | Authenticated header, bounded KDF parameters, clean errors, fuzzed |
 | Walking away from the screen | Server-side idle auto-lock; status polling does not extend it; lock on minimize (desktop) |
 | XSS via vault data | DOM-only rendering, strict CSP (`script-src 'self'`), no inline JS/CSS, only `http(s)` links |
+| Hostile import files | Own authenticated container for exports, size and row caps, strict field validation, all-or-nothing import |
+| Breach-check privacy | Opt-in, 5-character hash prefix only, `POST` + CSRF, HTTPS, no redirects |
 | Info leaks | `no-store` caching, `Referrer-Policy: no-referrer`, no `/docs` or OpenAPI, no CORS |
 
 Details, limitations and test evidence: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md),
@@ -83,15 +86,63 @@ pm search git
 pm edit github -g                        # rotate the password
 pm delete github
 pm gen -l 24                             # standalone generator
+pm totp github                           # current 2FA code (add with: pm add ... --totp)
+pm audit                                 # reused and weak passwords (local only)
+pm audit --breach                        # also check Have I Been Pwned (asks first)
+pm export backup.pmbak                   # encrypted backup, protected by its own password
+pm import backup.pmbak                   # or a CSV from Chrome/Edge/Firefox/Bitwarden/1Password
+pm --version
 ```
 
 Vault location: `~/.passwordmanager/vault.bin` (override with `--vault` or `PM_VAULT`).
+
+## 2FA codes (TOTP)
+
+Store an authenticator secret (or paste the `otpauth://` link) with an entry:
+
+```bash
+pm add github -u aymen -g --totp         # prompts (hidden) for the secret or link
+pm totp github                           # 123 456   (valid for 17s)
+```
+
+The UI shows the code with a countdown. Implemented with the standard library and checked
+against all RFC 6238 test vectors. Note that keeping passwords and 2FA codes in one vault makes
+them one factor, see the [threat model](docs/THREAT_MODEL.md).
+
+## Password audit and breach check
+
+`pm audit` flags reused and weak passwords locally. The breach check uses Have I Been Pwned's
+range API with k-anonymity: only the **first 5 hex characters of the password's SHA-1** are sent,
+never the password. It always asks first (`--breach`, or the UI's *Check* button).
+
+## Backup, export and import
+
+```bash
+pm export backup.pmbak                   # encrypted with its own password (12+ chars)
+pm import backup.pmbak                   # prompts for that password
+pm import chrome-passwords.csv           # then delete the CSV: it's plaintext
+pm import file --on-conflict skip        # default is rename, which never loses data
+```
+
+There is deliberately **no plaintext export**.
+
+## Releases and verifying downloads
+
+Release builds are produced by GitHub Actions with Sigstore build-provenance attestations:
+
+```bash
+sha256sum -c SHA256SUMS.txt
+gh attestation verify PasswordManager-vX.Y.Z-windows-x64.zip --repo Aymwvn/PasswordManager
+```
+
+Details and limits (no Authenticode signature yet): [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
 pytest                       # includes property-based fuzzing (Hypothesis)
+PM_FUZZ_EXAMPLES=500 pytest tests/test_fuzz.py   # deeper fuzz run
 ruff check .
 bandit -r src
 python scripts/attack_replay.py   # live attack replay, prints a results table
@@ -103,7 +154,7 @@ python scripts/attack_replay.py   # live attack replay, prints a results table
 - [x] Phase 2: local web UI (FastAPI + vanilla JS), auto-lock, Host/Origin checks, CSP
 - [x] Phase 2b: desktop app (pywebview) + Windows build script
 - [x] Phase 3: hardening (CSRF tokens, unlock lockout, body cap, fuzzing), threat model, self-pentest report
-- [ ] Phase 4: TOTP, breach check (HIBP k-anonymity), encrypted export/import, signed releases
+- [x] Phase 4: TOTP, breach check (HIBP k-anonymity), password audit, encrypted export/import, attested releases
 
 ## License
 

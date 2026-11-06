@@ -131,3 +131,78 @@ def test_locked_vault_refuses_everything(vault):
 def test_kdf_params_persist(vault, vault_path, fast_params):
     vault.add("x")
     assert crypto.parse_header(vault_path.read_bytes()).params == fast_params
+
+
+# ---- TOTP, field limits, import compatibility (Phase 4) ---------------------------------------
+
+import json  # noqa: E402
+
+from passwordmanager.core.vault import (  # noqa: E402
+    Entry,
+    InvalidEntry,
+    InvalidTotpSecret,
+    TotpNotConfigured,
+)
+
+RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # base32 of the RFC 6238 SHA-1 test key
+
+
+def test_totp_is_stored_encrypted_and_produces_codes(vault, vault_path):
+    vault.add("site", password="p", totp=RFC_SECRET)
+    assert RFC_SECRET.encode() not in vault_path.read_bytes()
+    reloaded = Vault(vault_path)
+    reloaded.unlock(MASTER)
+    code, remaining, period = reloaded.totp_code("site", at=59)
+    assert (code, remaining, period) == ("287082", 1, 30)
+
+
+def test_invalid_totp_is_rejected_and_nothing_is_saved(vault):
+    with pytest.raises(InvalidTotpSecret):
+        vault.add("site", totp="definitely not base32!!")
+    assert vault.list_names() == []
+    vault.add("site")
+    with pytest.raises(InvalidTotpSecret):
+        vault.update("site", totp="otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP")
+    assert vault.get("site").totp == ""
+
+
+def test_totp_can_be_removed_and_missing_totp_is_reported(vault):
+    vault.add("site", totp=RFC_SECRET)
+    vault.update("site", totp="")
+    with pytest.raises(TotpNotConfigured):
+        vault.totp_code("site")
+
+
+def test_search_never_matches_secrets(vault):
+    vault.add("site", password="needle-pw", totp=RFC_SECRET)
+    assert vault.search("needle") == [] and vault.search("GEZDGNBV") == []
+
+
+def test_field_limits_are_enforced_on_every_write_path(vault):
+    with pytest.raises(InvalidEntry):
+        vault.add("")
+    with pytest.raises(InvalidEntry):
+        vault.add("x", username="u" * 501)
+    vault.add("x")
+    with pytest.raises(InvalidEntry):
+        vault.update("x", notes="n" * 10_001)
+
+
+def test_vaults_written_before_totp_existed_still_open(vault_path, fast_params):
+    salt = crypto.new_salt()
+    key = crypto.derive_key(MASTER, salt, fast_params)
+    old_payload = {"entries": {"old": {"name": "old", "username": "u", "password": "p",
+                                       "url": "", "notes": "", "created": 1, "updated": 2}}}
+    vault_path.write_bytes(crypto.encrypt(key, json.dumps(old_payload).encode(), salt, fast_params))
+    reopened = Vault(vault_path)
+    reopened.unlock(MASTER)
+    assert reopened.get("old").totp == "" and reopened.get("old").password == "p"
+
+
+@pytest.mark.parametrize("name", ["a\nb", "\n", "tab\there", "nul\x00", "cr\rlf"])
+def test_names_with_control_characters_are_rejected(vault, name):  # F-E
+    with pytest.raises(InvalidEntry):
+        vault.add(name)
+    with pytest.raises(InvalidEntry):
+        vault.import_entries([Entry(name)])
+    assert vault.list_names() == []

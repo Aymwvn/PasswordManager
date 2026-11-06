@@ -57,6 +57,9 @@
         <label class="inline"><input id="gen-symbols" type="checkbox" checked> Symbols</label>
         <button id="btn-generate" type="button">Generate</button>
       </div>
+      <label>2FA secret or otpauth:// link
+        <input id="f-totp" type="password" maxlength="1000" autocomplete="off">
+      </label>
       <label>Notes <textarea id="f-notes" rows="3" maxlength="10000"></textarea></label>
       <p id="entry-error" class="error" role="alert"></p>
       <div class="row end">

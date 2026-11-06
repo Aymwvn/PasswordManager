@@ -31,13 +31,17 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from passwordmanager.core.breach import BreachCheckError, check_password, http_fetch
 from passwordmanager.core.crypto import KdfParams
 from passwordmanager.core.generator import estimate_entropy_bits, generate_password, strength_label
 from passwordmanager.core.vault import (
     Entry,
     EntryExists,
     EntryNotFound,
+    InvalidEntry,
     InvalidPassword,
+    InvalidTotpSecret,
+    TotpNotConfigured,
     Vault,
     VaultCorrupted,
     VaultError,
@@ -74,6 +78,9 @@ _ERROR_STATUS: dict[type[Exception], int] = {
     VaultLocked: 401,
     WeakMasterPassword: 422,
     VaultCorrupted: 500,
+    InvalidEntry: 422,
+    InvalidTotpSecret: 422,
+    TotpNotConfigured: 404,
 }
 
 
@@ -90,6 +97,7 @@ class EntryIn(BaseModel):
     password: str = Field("", max_length=1024)
     url: str = Field("", max_length=2000)
     notes: str = Field("", max_length=10_000)
+    totp: str = Field("", max_length=1000)
 
 
 class EntryUpdate(BaseModel):
@@ -97,6 +105,7 @@ class EntryUpdate(BaseModel):
     password: str | None = Field(None, max_length=1024)
     url: str | None = Field(None, max_length=2000)
     notes: str | None = Field(None, max_length=10_000)
+    totp: str | None = Field(None, max_length=1000)
 
 
 def _summary(entry: Entry) -> dict:
@@ -106,6 +115,7 @@ def _summary(entry: Entry) -> dict:
         "username": entry.username,
         "url": entry.url,
         "updated": entry.updated,
+        "has_totp": bool(entry.totp),
     }
 
 
@@ -268,6 +278,7 @@ def create_app(
     auto_lock_seconds: int = 300,
     kdf_params: KdfParams | None = None,
     clock: Callable[[], float] = time.monotonic,
+    breach_fetcher: Callable[[str], str] | None = None,
 ) -> FastAPI:
     state = SessionState(Path(vault_path), auto_lock_seconds, clock)
     limiter = AttemptLimiter(clock)
@@ -388,6 +399,7 @@ def create_app(
                 password=body.password,
                 url=body.url,
                 notes=body.notes,
+                totp=body.totp,
             )
         return _summary(entry)
 
@@ -409,6 +421,26 @@ def create_app(
         with state.mutex:
             state.vault.delete(name)
         return {"deleted": name}
+
+    @app.get("/api/totp/{name:path}", dependencies=authed)
+    def totp_code(name: str):
+        with state.mutex:
+            code, remaining, period = state.vault.totp_code(name)
+        return {"code": code, "seconds_remaining": remaining, "period": period}
+
+    @app.post("/api/breach/{name:path}", dependencies=authed)
+    def breach_check(name: str):
+        """Opt-in network call (POST + CSRF so a web page can't trigger it). Sends only the
+        first 5 hex chars of the password's SHA-1. The vault lock is NOT held during the request."""
+        with state.mutex:
+            password = state.vault.get(name).password
+        if not password:
+            raise HTTPException(status_code=422, detail="this entry has no password")
+        try:
+            count = check_password(password, breach_fetcher or http_fetch)
+        except BreachCheckError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"breached": count > 0, "count": count}
 
     @app.get("/api/generate")
     def generate(length: int = Query(20, ge=8, le=128), symbols: bool = True):

@@ -14,6 +14,8 @@
   let pollTimer = null;
   let searchTimer = null;
   let lastPing = 0;
+  let totpTimer = null;
+  let breachConsent = false; // ask once per session before the first network lookup
   let csrfToken = null; // lives in memory only; sent on every write as X-CSRF-Token
 
   // ---- helpers ---------------------------------------------------------------------------
@@ -120,6 +122,8 @@
 
   function lockUi(message) {
     clearInterval(pollTimer);
+    stopTotp();
+    breachConsent = false;
     csrfToken = null;
     entries = [];
     selectedName = null;
@@ -207,8 +211,87 @@
     } catch (err) { toast(err.message); }
   }
 
+  function stopTotp() {
+    clearInterval(totpTimer);
+    totpTimer = null;
+  }
+
+  function totpRow(entry) {
+    const HIDDEN = "\u2022\u2022\u2022 \u2022\u2022\u2022";
+    let revealed = false;
+    let code = "";
+    let left = 0;
+    const value = el("span", { class: "value mono" }, HIDDEN);
+    const timer = el("span", { class: "muted small" }, "");
+    const paint = () => {
+      const half = code.length / 2;
+      value.textContent = revealed && code ? `${code.slice(0, half)} ${code.slice(half)}` : HIDDEN;
+      timer.textContent = code ? `${left}s` : "";
+    };
+    const refresh = async () => {
+      try {
+        const r = await api("GET", `/totp/${encodeURIComponent(entry.name)}`);
+        code = r.code;
+        left = r.seconds_remaining;
+      } catch (err) {
+        code = "";
+        left = 5; // back off instead of hammering the server on errors
+        value.textContent = err.message;
+        return;
+      }
+      paint();
+    };
+    const revealBtn = el("button", { type: "button" }, "Reveal");
+    revealBtn.addEventListener("click", () => {
+      revealed = !revealed;
+      revealBtn.textContent = revealed ? "Hide" : "Reveal";
+      paint();
+    });
+    stopTotp();
+    refresh();
+    totpTimer = setInterval(() => {
+      left -= 1;
+      if (left <= 0) refresh();
+      else paint();
+    }, 1000);
+    return el("div", { class: "field" },
+      el("span", { class: "label" }, "2FA code"), value, timer, revealBtn,
+      el("button", { type: "button", onclick: () => code && copyText(code, "Code") }, "Copy"));
+  }
+
+  function breachRow(entry) {
+    const result = el("span", { class: "value" }, "Not checked");
+    const btn = el("button", { type: "button" }, "Check");
+    btn.addEventListener("click", async () => {
+      if (!breachConsent) {
+        const ok = window.confirm(
+          "This sends the first 5 characters of the password's SHA-1 hash to " +
+          "api.pwnedpasswords.com (k-anonymity). The password itself never leaves your computer. " +
+          "Continue?");
+        if (!ok) return;
+        breachConsent = true;
+      }
+      btn.disabled = true;
+      result.className = "value";
+      result.textContent = "Checking...";
+      try {
+        const r = await api("POST", `/breach/${encodeURIComponent(entry.name)}`);
+        result.textContent = r.breached
+          ? `Found in ${r.count.toLocaleString()} known breaches. Change it.`
+          : "Not found in known breaches";
+        result.className = r.breached ? "value danger-text" : "value ok-text";
+      } catch (err) {
+        result.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    return el("div", { class: "field" }, el("span", { class: "label" }, "Breach check"), result, btn);
+  }
+
   function renderDetail(entry) {
     const box = $("detail");
+    stopTotp();
     box.replaceChildren();
     if (!entry) {
       box.append(el("p", { class: "muted" }, "Select an entry or create a new one."));
@@ -245,6 +328,8 @@
       el("span", { class: "label" }, "Password"), pwValue, revealBtn,
       el("button", { type: "button", onclick: () => copyText(entry.password, "Password") }, "Copy")));
 
+    if (entry.totp) box.append(totpRow(entry));
+    box.append(breachRow(entry));
     if (entry.notes) box.append(field("Notes", entry.notes, [], "notes"));
     box.append(field("Updated", new Date(entry.updated * 1000).toLocaleString()));
     box.append(el("div", { class: "actions" },
@@ -286,6 +371,7 @@
     $("f-password").type = "password";
     $("btn-toggle-pw").textContent = "Show";
     $("f-notes").value = entry ? entry.notes : "";
+    $("f-totp").value = entry ? entry.totp : "";
     $("entry-error").textContent = "";
     updateMeter();
     $("entry-dialog").showModal();
@@ -293,7 +379,8 @@
   }
 
   $("entry-dialog").addEventListener("close", () => {
-    $("f-password").value = ""; // don't leave the secret sitting in a hidden input
+    $("f-password").value = ""; // don't leave secrets sitting in hidden inputs
+    $("f-totp").value = "";
   });
   $("btn-cancel").addEventListener("click", () => $("entry-dialog").close());
   $("btn-new").addEventListener("click", () => openDialog(null));
@@ -323,6 +410,7 @@
       url: $("f-url").value,
       password: $("f-password").value,
       notes: $("f-notes").value,
+      totp: $("f-totp").value,
     };
     try {
       let name = editingName;

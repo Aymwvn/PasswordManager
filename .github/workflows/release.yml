@@ -1,0 +1,102 @@
+name: Release
+
+# Push a tag like v0.4.0 to build, attest and publish a release.
+# Run it manually (Actions tab > Release > Run workflow) for a dry run: builds everything,
+# publishes nothing.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag must match the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python - <<'PY'
+          import os, tomllib
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          with open("pyproject.toml", "rb") as fh:
+              version = tomllib.load(fh)["project"]["version"]
+          assert tag == version, f"tag {tag} does not match pyproject version {version}"
+          PY
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: bandit -r src -q
+      - run: pytest -q
+
+  build-python:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+          if-no-files-found: error
+
+  build-windows:
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build the executable (PyInstaller)
+        shell: cmd
+        run: packaging\build_windows.bat
+      - name: Zip it
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}  # via env, never interpolated into the script
+        run: Compress-Archive -Path dist\PasswordManager -DestinationPath "PasswordManager-$env:TAG-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: PasswordManager-*-windows-x64.zip
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-python, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the GitHub release
+      id-token: write      # keyless Sigstore signing (OIDC)
+      attestations: write  # store the attestation
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Checksums
+        working-directory: release
+        run: sha256sum -- *.zip *.whl *.tar.gz > SHA256SUMS.txt
+      - name: Attest build provenance (Sigstore)
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release/*.zip
+            release/*.whl
+            release/*.tar.gz
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
