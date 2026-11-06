@@ -158,4 +158,4 @@ python scripts/attack_replay.py   # live attack replay, prints a results table
 
 ## License
 
-TBD
+MIT. See [LICENSE](LICENSE).
