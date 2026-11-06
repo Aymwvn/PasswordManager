@@ -81,7 +81,7 @@ jobs:
       id-token: write      # keyless Sigstore signing (OIDC)
       attestations: write  # store the attestation
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
