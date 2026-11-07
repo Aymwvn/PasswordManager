@@ -35,6 +35,7 @@ def app(tmp_path, fast_params, clock):
         auto_lock_seconds=60,
         kdf_params=fast_params,
         clock=clock,
+        clipboard=None,
     )
 
 
@@ -451,3 +452,106 @@ def test_vault_stays_responsive_while_a_breach_lookup_is_in_flight(
 def test_api_rejects_names_that_could_not_be_addressed_later(authed, name):  # F-E
     assert authed.post("/api/entries", json={**ENTRY, "name": name}).status_code == 422
     assert authed.get("/api/entries").json() == []
+
+
+# ---- Phase 4b: native clipboard endpoints -------------------------------------------------------
+
+from .conftest import FakeClipboard  # noqa: E402
+
+
+@pytest.fixture
+def clip(tmp_path, fast_params, clock):
+    fake = FakeClipboard()
+    app = create_app(tmp_path / "v.bin", allowed_hosts={"testserver"}, auto_lock_seconds=60,
+                     kdf_params=fast_params, clock=clock, clipboard=fake)
+    client = TestClient(app)
+    token = client.post("/api/init", json={"master_password": MASTER}).json()["csrf_token"]
+    client.headers["X-CSRF-Token"] = token
+    client.post("/api/entries", json={**ENTRY, "totp": RFC_SECRET})
+    return client, fake, app
+
+
+def test_capabilities_reflect_whether_a_native_clipboard_exists(tmp_path, fast_params):
+    without = create_app(tmp_path / "a.bin", allowed_hosts={"testserver"}, kdf_params=fast_params,
+                         clipboard=None)
+    with_one = create_app(tmp_path / "b.bin", allowed_hosts={"testserver"}, kdf_params=fast_params,
+                          clipboard=FakeClipboard())
+    assert TestClient(without).get("/api/capabilities").json() == {"native_clipboard": False}
+    assert TestClient(with_one).get("/api/capabilities").json() == {"native_clipboard": True}
+
+
+def test_copy_puts_password_and_code_on_the_native_clipboard(clip):
+    client, fake, _ = clip
+    res = client.post("/api/copy", json={"name": "github", "field": "password"})
+    assert res.json() == {"copied": True, "clears_in": 15}
+    assert fake.text == ENTRY["password"]
+    client.post("/api/copy", json={"name": "github", "field": "totp"})
+    assert re.fullmatch(r"\d{6}", fake.text)
+
+
+def test_copy_needs_a_session_and_a_csrf_token(clip, app):
+    client, fake, live_app = clip
+    token = client.headers.pop("X-CSRF-Token")
+    body = {"name": "github", "field": "password"}
+    assert client.post("/api/copy", json=body).status_code == 403
+    assert TestClient(live_app).post("/api/copy", json=body).status_code == 401
+    assert fake.copied == []
+    client.headers["X-CSRF-Token"] = token
+
+
+@pytest.mark.parametrize(
+    "body,status",
+    [
+        ({"name": "github", "field": "username"}, 422),  # only secrets use the native path
+        ({"name": "github", "field": "notes"}, 422),
+        ({"name": "", "field": "password"}, 422),
+        ({"name": "missing", "field": "password"}, 404),
+    ],
+)
+def test_copy_rejects_bad_requests(clip, body, status):
+    client, fake, _ = clip
+    assert client.post("/api/copy", json=body).status_code == status
+    assert fake.copied == []
+
+
+def test_copy_of_empty_or_unconfigured_fields(clip):
+    client, fake, _ = clip
+    client.post("/api/entries", json={"name": "bare"})
+    assert client.post("/api/copy", json={"name": "bare", "field": "password"}).status_code == 422
+    assert client.post("/api/copy", json={"name": "bare", "field": "totp"}).status_code == 404
+    assert fake.copied == []
+
+
+def test_copy_without_a_native_clipboard_is_501(authed):
+    # `app` is built with clipboard=None, so the frontend must fall back to the browser
+    authed.post("/api/entries", json=ENTRY)
+    res = authed.post("/api/copy", json={"name": "github", "field": "password"})
+    assert res.status_code == 501
+
+
+def test_locking_wipes_a_copied_secret_from_the_clipboard(clip):
+    client, fake, _ = clip
+    client.post("/api/copy", json={"name": "github", "field": "password"})
+    client.post("/api/lock")
+    assert fake.text == ""
+
+
+def test_locking_never_wipes_something_else_the_user_copied(clip):
+    client, fake, _ = clip
+    client.post("/api/copy", json={"name": "github", "field": "password"})
+    fake.user_copies("my shopping list")
+    client.post("/api/lock")
+    assert fake.text == "my shopping list"
+
+
+def test_idle_auto_lock_also_wipes_the_clipboard(clip, clock):
+    client, fake, _ = clip
+    client.post("/api/copy", json={"name": "github", "field": "password"})
+    clock.now += 61
+    assert client.get("/api/status").json()["unlocked"] is False
+    assert fake.text == ""
+
+
+def test_frontend_prefers_the_native_clipboard_for_secrets(client):
+    js = client.get("/app.js").text
+    assert '"/capabilities"' in js and '"/copy"' in js and "copySecret(" in js

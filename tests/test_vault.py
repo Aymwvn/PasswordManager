@@ -206,3 +206,17 @@ def test_names_with_control_characters_are_rejected(vault, name):  # F-E
     with pytest.raises(InvalidEntry):
         vault.import_entries([Entry(name)])
     assert vault.list_names() == []
+
+
+def test_lock_overwrites_the_key_buffer_with_zeros(vault):
+    buffer = vault._key
+    assert any(buffer)
+    vault.lock()
+    assert vault._key is None and not any(buffer)
+
+
+def test_a_wrong_password_never_leaves_a_key_behind(vault, vault_path):
+    other = Vault(vault_path)
+    with pytest.raises(InvalidPassword):
+        other.unlock("totally wrong password")
+    assert other._key is None

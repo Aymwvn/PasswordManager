@@ -16,6 +16,7 @@
   let lastPing = 0;
   let totpTimer = null;
   let breachConsent = false; // ask once per session before the first network lookup
+  let nativeClipboard = false; // set at boot from /api/capabilities
   let csrfToken = null; // lives in memory only; sent on every write as X-CSRF-Token
 
   // ---- helpers ---------------------------------------------------------------------------
@@ -98,6 +99,21 @@
     } else {
       toast(`${what} copied`);
     }
+  }
+
+  // Secrets: prefer the server-side native clipboard (kept out of Windows clipboard history,
+  // cleared only if still ours, wiped on lock). Fall back to the browser clipboard.
+  async function copySecret(entryName, field, what, fallbackValue) {
+    if (nativeClipboard) {
+      try {
+        await api("POST", "/copy", { name: entryName, field });
+        toast(`${what} copied (clears in 15s)`);
+        return;
+      } catch (err) {
+        toast(`${err.message}; using the browser clipboard`);
+      }
+    }
+    await copyText(fallbackValue, what);
   }
 
   // ---- auth screen -----------------------------------------------------------------------
@@ -256,7 +272,8 @@
     }, 1000);
     return el("div", { class: "field" },
       el("span", { class: "label" }, "2FA code"), value, timer, revealBtn,
-      el("button", { type: "button", onclick: () => code && copyText(code, "Code") }, "Copy"));
+      el("button", { type: "button",
+        onclick: () => code && copySecret(entry.name, "totp", "Code", code) }, "Copy"));
   }
 
   function breachRow(entry) {
@@ -326,7 +343,8 @@
     });
     box.append(el("div", { class: "field" },
       el("span", { class: "label" }, "Password"), pwValue, revealBtn,
-      el("button", { type: "button", onclick: () => copyText(entry.password, "Password") }, "Copy")));
+      el("button", { type: "button",
+        onclick: () => copySecret(entry.name, "password", "Password", entry.password) }, "Copy")));
 
     if (entry.totp) box.append(totpRow(entry));
     box.append(breachRow(entry));
@@ -457,6 +475,9 @@
 
   (async () => {
     try {
+      try {
+        nativeClipboard = (await api("GET", "/capabilities")).native_clipboard === true;
+      } catch { nativeClipboard = false; }
       const st = await api("GET", "/status");
       if (st.unlocked) { csrfToken = st.csrf_token; await showApp(); }
       else showAuth(st.vault_exists);

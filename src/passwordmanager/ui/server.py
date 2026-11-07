@@ -14,6 +14,7 @@ Defences (see docs/THREAT_MODEL.md and docs/SELF_PENTEST.md):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import secrets
 import threading
@@ -23,6 +24,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 import uvicorn
@@ -32,6 +34,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from passwordmanager.core.breach import BreachCheckError, check_password, http_fetch
+from passwordmanager.core.clipboard import (
+    ClipboardBackend,
+    ClipboardError,
+    ClipboardGuard,
+    default_backend,
+)
 from passwordmanager.core.crypto import KdfParams
 from passwordmanager.core.generator import estimate_entropy_bits, generate_password, strength_label
 from passwordmanager.core.vault import (
@@ -100,6 +108,11 @@ class EntryIn(BaseModel):
     totp: str = Field("", max_length=1000)
 
 
+class CopyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    field: Literal["password", "totp"]
+
+
 class EntryUpdate(BaseModel):
     username: str | None = Field(None, max_length=500)
     password: str | None = Field(None, max_length=1024)
@@ -164,7 +177,14 @@ class AttemptLimiter:
 class SessionState:
     """Holds the (single) unlocked vault, the session token and its CSRF token."""
 
-    def __init__(self, vault_path: Path, auto_lock_seconds: int, clock: Callable[[], float]):
+    def __init__(
+        self,
+        vault_path: Path,
+        auto_lock_seconds: int,
+        clock: Callable[[], float],
+        on_lock: Callable[[], object] | None = None,
+    ):
+        self.on_lock = on_lock
         self.vault = Vault(vault_path)
         self.ttl = auto_lock_seconds
         self.clock = clock
@@ -186,6 +206,9 @@ class SessionState:
             self.vault.lock()
             self.token = None
             self.csrf = None
+            if self.on_lock is not None:  # e.g. wipe a copied secret from the clipboard
+                with contextlib.suppress(Exception):
+                    self.on_lock()
 
     def check_idle(self) -> None:
         with self.mutex:
@@ -279,8 +302,16 @@ def create_app(
     kdf_params: KdfParams | None = None,
     clock: Callable[[], float] = time.monotonic,
     breach_fetcher: Callable[[str], str] | None = None,
+    clipboard: ClipboardBackend | None | Literal["auto"] = "auto",
 ) -> FastAPI:
-    state = SessionState(Path(vault_path), auto_lock_seconds, clock)
+    backend = default_backend() if clipboard == "auto" else clipboard
+    clip_guard = ClipboardGuard(backend) if backend is not None else None
+    state = SessionState(
+        Path(vault_path),
+        auto_lock_seconds,
+        clock,
+        on_lock=clip_guard.clear_if_ours if clip_guard is not None else None,
+    )
     limiter = AttemptLimiter(clock)
 
     @asynccontextmanager
@@ -441,6 +472,29 @@ def create_app(
         except BreachCheckError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"breached": count > 0, "count": count}
+
+    @app.get("/api/capabilities")
+    def capabilities():
+        return {"native_clipboard": clip_guard is not None}
+
+    @app.post("/api/copy", dependencies=authed)
+    def copy_secret(body: CopyIn):
+        """Copy a password or 2FA code with the native, history-excluding clipboard. The secret
+        goes straight from the vault to the clipboard and never passes through the page."""
+        if clip_guard is None:
+            raise HTTPException(status_code=501, detail="native clipboard is not available")
+        with state.mutex:
+            if body.field == "totp":
+                value = state.vault.totp_code(body.name)[0]
+            else:
+                value = state.vault.get(body.name).password
+        if not value:
+            raise HTTPException(status_code=422, detail="that field is empty")
+        try:
+            clip_guard.copy(value)
+        except ClipboardError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"copied": True, "clears_in": int(clip_guard.clear_after)}
 
     @app.get("/api/generate")
     def generate(length: int = Query(20, ge=8, le=128), symbols: bool = True):

@@ -183,3 +183,33 @@ def test_import_of_a_missing_file_is_a_clean_error(vpath, tmp_path, monkeypatch,
     answers(monkeypatch)
     assert cli.main(["--vault", vpath, "import", str(tmp_path / "nope.csv")]) == 1
     assert "not found" in capsys.readouterr().err
+
+
+# ---- Phase 4b: native clipboard in the CLI --------------------------------------------------------
+
+from .conftest import FakeClipboard  # noqa: E402
+
+
+def _entry_with_totp(vpath, monkeypatch):
+    answers(monkeypatch, {"TOTP secret": RFC_SECRET})
+    assert cli.main(["--vault", vpath, "add", "site", "-g", "--totp"]) == 0
+    answers(monkeypatch)
+
+
+def test_totp_copy_uses_the_native_clipboard_and_clears_it(vpath, monkeypatch, capsys):
+    fake = FakeClipboard()
+    monkeypatch.setattr(cli, "default_backend", lambda: fake)
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    _entry_with_totp(vpath, monkeypatch)
+    assert cli.main(["--vault", vpath, "totp", "site", "--copy"]) == 0
+    assert len(fake.copied) == 1 and re.fullmatch(r"\d{6}", fake.copied[0])
+    assert fake.text == ""  # still ours after the wait, so it was cleared
+
+
+def test_cli_leaves_alone_what_the_user_copied_during_the_wait(vpath, monkeypatch):
+    fake = FakeClipboard()
+    monkeypatch.setattr(cli, "default_backend", lambda: fake)
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: fake.user_copies("something else"))
+    _entry_with_totp(vpath, monkeypatch)
+    cli.main(["--vault", vpath, "totp", "site", "--copy"])
+    assert fake.text == "something else"

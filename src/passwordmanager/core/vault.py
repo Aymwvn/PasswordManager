@@ -88,7 +88,7 @@ def validate_entry_fields(**fields: str) -> None:
 class Vault:
     def __init__(self, path: str | os.PathLike[str]):
         self.path = Path(path)
-        self._key: bytes | None = None
+        self._key: bytearray | None = None  # mutable so lock() can overwrite it
         self._salt: bytes = b""
         self._params = KdfParams()
         self._entries: dict[str, Entry] = {}
@@ -108,7 +108,7 @@ class Vault:
             )
         vault._params = params or KdfParams()
         vault._salt = crypto.new_salt()
-        vault._key = crypto.derive_key(master_password, vault._salt, vault._params)
+        vault._key = bytearray(crypto.derive_key(master_password, vault._salt, vault._params))
         vault.save()
         return vault
 
@@ -126,12 +126,17 @@ class Vault:
             entries = {name: Entry(**raw) for name, raw in data["entries"].items()}
         except (ValueError, KeyError, TypeError) as exc:
             raise VaultCorrupted("vault payload is malformed") from exc
-        self._key, self._salt, self._params = key, header.salt, header.params
+        self._key, self._salt, self._params = bytearray(key), header.salt, header.params
         self._entries = entries
 
     def lock(self) -> None:
         """Drop the key and entries. NOTE: Python can't guarantee secure memory wiping;
-        this removes our references, it does not scrub RAM. (See docs/THREAT_MODEL.md.)"""
+        this removes our references, it does not scrub RAM. (See docs/THREAT_MODEL.md.)
+
+        The key buffer is overwritten with zeros first. That shrinks the window, but copies made
+        by the interpreter or the crypto library are out of our reach, so it is best-effort."""
+        if self._key is not None:
+            self._key[:] = bytes(len(self._key))
         self._key = None
         self._entries = {}
 

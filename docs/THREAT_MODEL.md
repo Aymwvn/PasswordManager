@@ -30,13 +30,20 @@ These are real limits, not oversights. Where a mitigation exists but is partial,
 
 1. **Malware running as the same user** (keylogger, debugger, memory scraper) defeats any password
    manager. We do not claim otherwise.
-2. **No guaranteed memory wiping.** Python strings and bytes are immutable and may be copied;
-   `Vault.lock()` drops references but cannot scrub RAM. A memory dump after locking may still
-   contain secrets. Mitigation: short auto-lock. Fixing this properly means a native core.
-3. **Clipboard.** Copied passwords are cleared after 15 s, but the browser/WebView clipboard API
-   cannot tell whether the clipboard still holds *our* value, so the clear may also wipe
-   something the user copied meanwhile. Other software (clipboard managers, Windows clipboard
-   history) can capture the value before it is cleared.
+2. **No guaranteed memory wiping.** Python strings and bytes are immutable and may be copied.
+   `Vault.lock()` overwrites the derived key's buffer with zeros and drops the decrypted entries,
+   but copies made by the interpreter or the crypto library, and the entry strings themselves,
+   cannot be scrubbed from Python. A memory dump after locking may still contain secrets.
+   Mitigation: short auto-lock and lock on minimize. Fixing this properly means a native core.
+3. **Clipboard.** On Windows (desktop app, `pm ui`, CLI) passwords and 2FA codes are copied with
+   the clipboard-history and cloud-clipboard opt-out formats set, are cleared after 15 s *only if
+   nothing else was copied meanwhile* (checked with the clipboard sequence number), and are cleared
+   again when the vault locks or the app exits. Limits: the opt-out formats are a convention.
+   Windows' own history and cloud clipboard honour them, but some third-party clipboard managers
+   ignore them, and any program watching the clipboard can read the value during those 15 s.
+   Where the native path is unavailable (non-Windows, or a plain browser without the server-side
+   copy) the browser clipboard API is used instead; it cannot tell whether the clipboard still
+   holds our value and cannot opt out of history.
 4. **Unlock throttling is in-memory.** Restarting the app resets it. It protects the UI path;
    offline attacks (A1) are only slowed by Argon2.
 5. **No rollback protection.** Someone who can write the vault file can swap in an older valid

@@ -118,6 +118,7 @@ def _session(tmp):
         allowed_hosts={"testserver"},
         auto_lock_seconds=3600,
         kdf_params=FAST,
+        clipboard=None,
     )
     client = TestClient(app)
     token = client.post("/api/init", json={"master_password": MASTER}).json()["csrf_token"]

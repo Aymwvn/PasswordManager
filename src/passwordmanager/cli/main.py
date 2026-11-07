@@ -12,6 +12,7 @@ from pathlib import Path
 from passwordmanager import __version__
 from passwordmanager.core.audit import audit
 from passwordmanager.core.breach import BreachCheckError, check_password
+from passwordmanager.core.clipboard import ClipboardError, ClipboardGuard, default_backend
 from passwordmanager.core.generator import estimate_entropy_bits, generate_password, strength_label
 from passwordmanager.core.portability import export_encrypted, load_import
 from passwordmanager.core.vault import CONFLICT_MODES, Entry, Vault, VaultError
@@ -32,7 +33,29 @@ def _open(args: argparse.Namespace) -> Vault:
     return vault
 
 
+def _copy_native(secret: str, what: str) -> bool:
+    """Windows: history-excluded copy, cleared only if still ours. False if unavailable."""
+    backend = default_backend()
+    if backend is None:
+        return False
+    guard = ClipboardGuard(backend, clear_after=CLIP_SECONDS)
+    try:
+        guard.copy(secret)
+    except ClipboardError:
+        return False
+    print(f"{what} copied. Clearing clipboard in {CLIP_SECONDS}s (Ctrl+C to clear now)...")
+    try:
+        time.sleep(CLIP_SECONDS)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        guard.clear_if_ours()
+    return True
+
+
 def _copy_temporarily(secret: str, what: str = "Password") -> bool:
+    if _copy_native(secret, what):
+        return True
     try:
         import pyperclip
     except ImportError:

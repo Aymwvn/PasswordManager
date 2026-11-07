@@ -20,3 +20,30 @@ def vault_path(tmp_path):
 @pytest.fixture
 def vault(vault_path, fast_params):
     return Vault.create(vault_path, MASTER, fast_params)
+
+
+class FakeClipboard:
+    """In-memory stand-in for a ClipboardBackend (what the server and CLI talk to)."""
+
+    def __init__(self):
+        self.text = ""
+        self.seq = 0
+        self.copied = []
+
+    def set_secret(self, text):
+        self.seq += 1
+        self.text = text
+        self.copied.append(text)
+        return self.seq
+
+    def sequence_number(self):
+        return self.seq
+
+    def clear(self):
+        self.seq += 1
+        self.text = ""
+
+    def user_copies(self, text):
+        """Simulate the user copying something else."""
+        self.seq += 1
+        self.text = text

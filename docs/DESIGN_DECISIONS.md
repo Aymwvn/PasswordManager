@@ -157,17 +157,21 @@ libraries. We cannot guarantee that secrets are wiped from RAM, so we do not cla
 - `Vault.lock()` drops the key and the decrypted entries.
 - Idle auto-lock runs on the server, and status polling does not extend it. The desktop app also
   locks on minimize.
-- Passwords are shown only on request (Reveal), and the clipboard is cleared after 15 seconds.
+- Passwords are shown only on request (Reveal).
+- Windows: copied passwords and 2FA codes go to the clipboard through the native API with the
+  history and cloud-clipboard opt-out formats set. The 15-second clear only fires if the clipboard
+  sequence number shows nothing else was copied meanwhile, and the clipboard is also cleared when
+  the vault locks or the app exits. Elsewhere the browser clipboard is the weaker fallback.
+- `Vault.lock()` overwrites the derived key's buffer (a `bytearray`) with zeros. This shrinks the
+  window but is not a guarantee: copies held by the interpreter or the crypto library are out of
+  reach.
 - No request body is logged by our code; the server runs at warning level.
 
 **Not done (candidate follow-ups)**
 
-- Hold the derived key in a mutable buffer and zero it on lock. This reduces copies but cannot
-  remove them: the crypto library keeps its own copy.
+- Scrub the copies of the key and the entry strings that Python and the crypto library hold
+  (not possible from pure Python).
 - Lock memory pages to keep secrets out of the swap file.
-- Keep copied passwords out of Windows clipboard history and cloud clipboard. The browser
-  clipboard API cannot set the relevant clipboard formats, so this needs a small native call from
-  the desktop shell.
 - Measure the real effect with a process memory dump after locking (checklist item 13 in the
   self-pentest report). We expect to find residue and will document it.
 
@@ -227,5 +231,8 @@ would let the window talk to Python directly, removing the localhost listener fo
 - VBS enclave requirements and development flow:
   <https://learn.microsoft.com/windows/win32/trusted-execution/vbs-enclaves> and
   <https://learn.microsoft.com/windows/win32/trusted-execution/vbs-enclaves-dev-guide>
+- Clipboard history and cloud-clipboard opt-out formats (`CanIncludeInClipboardHistory`,
+  `CanUploadToCloudClipboard`, `ExcludeClipboardContentFromMonitorProcessing`):
+  <https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats>
 - TPM key protection, non-exportability, sealing, and the global dictionary-attack lockout:
   <https://learn.microsoft.com/en-us/windows/security/hardware-security/tpm/tpm-fundamentals>
