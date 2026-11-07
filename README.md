@@ -72,7 +72,7 @@ strength meter, copy a password (the clipboard is cleared after 15 s), and auto-
 | Info leaks | `no-store` caching, `Referrer-Policy: no-referrer`, no `/docs` or OpenAPI, no CORS |
 
 Details, limitations and test evidence: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md),
-[docs/SELF_PENTEST.md](docs/SELF_PENTEST.md), [SECURITY.md](SECURITY.md).
+[docs/SELF_PENTEST.md](docs/SELF_PENTEST.md), [SECURITY.md](SECURITY.md),[docs/DESIGN_DECISIONS.md] (docs/DESIGN_DECISIONS.md).
 
 ## CLI
 
