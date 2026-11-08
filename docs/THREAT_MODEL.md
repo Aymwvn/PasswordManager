@@ -67,3 +67,9 @@ These are real limits, not oversights. Where a mitigation exists but is partial,
     "not found" or a false alarm; it cannot make the app reveal the password.
 13. **Password audit is heuristic** (pool-size entropy, repetition, reuse). It knows nothing about
     dictionary words or leaked patterns, so "not flagged" is not proof of strength.
+14. **Concurrent writers are detected, not merged.** Every save rewrites the whole file from
+    memory. The app refuses to save if the file changed on disk since it was loaded, and refuses to
+    run twice on one vault, but it cannot merge two people's edits: you lock, unlock and redo the
+    change. A small window between the check and the file replace remains, and a sync tool that
+    rewrites the file with different bytes will cause (safe) conflicts.
+

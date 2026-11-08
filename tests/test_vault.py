@@ -220,3 +220,72 @@ def test_a_wrong_password_never_leaves_a_key_behind(vault, vault_path):
     with pytest.raises(InvalidPassword):
         other.unlock("totally wrong password")
     assert other._key is None
+
+
+# ---- lost-update protection and transactional saves --------------------------------------------
+
+import passwordmanager.core.vault as vault_module  # noqa: E402
+from passwordmanager.core.vault import VaultChangedOnDisk  # noqa: E402
+
+
+def test_a_second_writer_is_refused_instead_of_silently_overwriting(vault, vault_path):
+    other = Vault(vault_path)
+    other.unlock(MASTER)
+    vault.add("from-app")
+    with pytest.raises(VaultChangedOnDisk, match="NOT saved"):
+        other.add("from-cli")
+    assert other.list_names() == []  # rolled back in memory too
+    other.lock()
+    other.unlock(MASTER)  # reload picks up the other writer's data
+    assert other.list_names() == ["from-app"]
+    other.add("from-cli")
+    with pytest.raises(VaultChangedOnDisk):  # and now the first instance is the stale one
+        vault.add("x")
+
+
+def test_rewriting_identical_bytes_is_not_a_conflict(vault, vault_path):
+    vault.add("a")
+    vault_path.write_bytes(vault_path.read_bytes())  # e.g. a sync tool touching the file
+    vault.add("b")
+    assert vault.list_names() == ["a", "b"]
+
+
+def test_every_mutation_is_refused_when_the_file_changed(vault, vault_path):
+    vault.add("keep", password="old")
+    other = Vault(vault_path)
+    other.unlock(MASTER)
+    other.add("theirs")
+    for call in (
+        lambda: vault.add("mine"),
+        lambda: vault.update("keep", password="new"),
+        lambda: vault.delete("keep"),
+        lambda: vault.import_entries([Entry("imported")]),
+    ):
+        with pytest.raises(VaultChangedOnDisk):
+            call()
+    assert vault.list_names() == ["keep"] and vault.get("keep").password == "old"
+
+
+def test_failed_saves_roll_back_the_in_memory_change(vault, monkeypatch):
+    vault.add("keep", password="old")
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(vault_module, "atomic_write", disk_full)
+    for call in (
+        lambda: vault.add("new"),
+        lambda: vault.update("keep", password="new"),
+        lambda: vault.delete("keep"),
+        lambda: vault.import_entries([Entry("imported"), Entry("keep", password="x")]),
+    ):
+        with pytest.raises(OSError):
+            call()
+    assert vault.list_names() == ["keep"] and vault.get("keep").password == "old"
+
+
+def test_a_deleted_vault_file_is_recreated_not_treated_as_a_conflict(vault, vault_path):
+    vault.add("a")
+    vault_path.unlink()
+    vault.add("b")
+    assert vault_path.exists()

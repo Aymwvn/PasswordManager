@@ -15,6 +15,7 @@ the end; they change, so re-check before relying on them.
 | [DD-4](#dd-4-no-plaintext-export) | No plaintext export | Decided |
 | [DD-5](#dd-5-totp-secrets-live-in-the-same-vault) | TOTP secrets live in the same vault | Decided, trade-off documented |
 | [DD-6](#dd-6-loopback-web-server--webview-instead-of-a-native-toolkit) | Loopback web server + webview instead of a native toolkit | Decided, revisit later |
+| [DD-7](#dd-7-one-app-instance-and-refuse-to-overwrite-a-vault-changed-elsewhere) | One app instance, and refuse to overwrite a vault changed elsewhere | Done |
 
 ---
 
@@ -220,6 +221,35 @@ a big Node supply chain).
 
 **Revisit when:** the desktop app should drop the TCP port entirely. pywebview's JavaScript bridge
 would let the window talk to Python directly, removing the localhost listener for desktop mode.
+
+---
+
+## DD-7: One app instance, and refuse to overwrite a vault changed elsewhere
+
+**Context:** adding a global hotkey made a double launch easy. Every save rewrites the whole file
+from the in-memory copy, so with two writers (two app windows, or the app and the CLI) the second
+save silently discards the first one's changes. This lost-update bug existed from the first
+version.
+
+**Decision**
+
+1. A named mutex per vault path. A second launch finds the running window by its exact title,
+   restores and raises it, and exits without starting anything.
+2. Every save compares the SHA-256 of the file on disk with what we last read or wrote. If it
+   differs, the save is refused (`VaultChangedOnDisk`, HTTP 409), nothing is written, and the
+   in-memory change is rolled back. Lock and unlock reloads it.
+3. All mutations are transactional: any failed save (changed file, disk full, permissions) rolls
+   the in-memory state back, so memory and disk cannot silently disagree.
+
+**Alternatives:** OS file locking (platform quirks, stale locks after a crash); merging concurrent
+edits (needs per-entry versions and a conflict UI); a background sync service (out of scope).
+
+**Consequences:** no silent data loss, but also no merge. A tiny race between the check and the
+replace remains. The check is content-based, so a sync tool that rewrites identical bytes is not a
+conflict. The window title is deliberately more specific than "PasswordManager", because an
+Explorer window for a folder of that name has exactly that title.
+
+**Revisit when:** multi-device sync is built; that needs per-entry timestamps and merging.
 
 ---
 

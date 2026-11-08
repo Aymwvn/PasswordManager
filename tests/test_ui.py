@@ -8,6 +8,7 @@ pytest.importorskip("httpx")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from passwordmanager.core.vault import Vault  # noqa: E402
 from passwordmanager.ui.server import AttemptLimiter, create_app, run  # noqa: E402
 
 MASTER = "correct horse battery"
@@ -555,3 +556,17 @@ def test_idle_auto_lock_also_wipes_the_clipboard(clip, clock):
 def test_frontend_prefers_the_native_clipboard_for_secrets(client):
     js = client.get("/app.js").text
     assert '"/capabilities"' in js and '"/copy"' in js and "copySecret(" in js
+
+
+def test_a_vault_changed_elsewhere_gives_409_and_nothing_is_lost(authed, tmp_path):
+    authed.post("/api/entries", json=ENTRY)
+    other = Vault(tmp_path / "v.bin")
+    other.unlock(MASTER)
+    other.add("from-cli")
+    res = authed.post("/api/entries", json={**ENTRY, "name": "rejected"})
+    assert res.status_code == 409 and "NOT saved" in res.json()["detail"]
+    assert [e["name"] for e in authed.get("/api/entries").json()] == ["github"]
+    authed.post("/api/lock")
+    fresh = authed.post("/api/unlock", json={"master_password": MASTER})
+    authed.headers["X-CSRF-Token"] = fresh.json()["csrf_token"]
+    assert [e["name"] for e in authed.get("/api/entries").json()] == ["from-cli", "github"]

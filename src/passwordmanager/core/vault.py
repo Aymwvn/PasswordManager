@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import time
@@ -41,6 +43,7 @@ class EntryNotFound(VaultError): ...
 class InvalidEntry(VaultError): ...
 class InvalidTotpSecret(InvalidEntry): ...
 class TotpNotConfigured(VaultError): ...
+class VaultChangedOnDisk(VaultError): ...
 
 
 @dataclass
@@ -92,6 +95,7 @@ class Vault:
         self._salt: bytes = b""
         self._params = KdfParams()
         self._entries: dict[str, Entry] = {}
+        self._disk_digest: bytes | None = None  # SHA-256 of the file as we last read/wrote it
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -115,8 +119,9 @@ class Vault:
     def unlock(self, master_password: str) -> None:
         if not self.path.exists():
             raise VaultNotFound(f"no vault at {self.path}")
+        blob = self.path.read_bytes()
         try:
-            plaintext, key, header = crypto.decrypt(master_password, self.path.read_bytes())
+            plaintext, key, header = crypto.decrypt(master_password, blob)
         except crypto.DecryptionError as exc:
             raise InvalidPassword(str(exc)) from exc
         except crypto.InvalidFormat as exc:
@@ -128,6 +133,7 @@ class Vault:
             raise VaultCorrupted("vault payload is malformed") from exc
         self._key, self._salt, self._params = bytearray(key), header.salt, header.params
         self._entries = entries
+        self._disk_digest = hashlib.sha256(blob).digest()
 
     def lock(self) -> None:
         """Drop the key and entries. NOTE: Python can't guarantee secure memory wiping;
@@ -148,13 +154,42 @@ class Vault:
         if self._key is None:
             raise VaultLocked("vault is locked")
 
+    def _snapshot(self) -> dict[str, Entry]:
+        return {name: replace(entry) for name, entry in self._entries.items()}
+
+    @contextlib.contextmanager
+    def _transaction(self):
+        """Mutate in memory, then save. If saving fails for ANY reason (file changed elsewhere,
+        disk full, permissions) the in-memory change is rolled back so memory and disk agree."""
+        snapshot = self._snapshot()
+        try:
+            yield
+            self.save()
+        except BaseException:
+            self._entries = snapshot
+            raise
+
     # ---- persistence -----------------------------------------------------------------------
+
+    def _refuse_if_changed_on_disk(self) -> None:
+        """Every save rewrites the whole file from memory. If someone else (another window, the
+        CLI, a sync tool) changed it since we loaded it, saving would silently discard their
+        work, so refuse. Content-based: rewriting identical bytes is not a conflict."""
+        if self._disk_digest is None or not self.path.exists():
+            return
+        if hashlib.sha256(self.path.read_bytes()).digest() != self._disk_digest:
+            raise VaultChangedOnDisk(
+                "the vault file was changed by another program or window, so this change was "
+                "NOT saved. Lock and unlock to reload it, then redo the change."
+            )
 
     def save(self) -> None:
         self._require_unlocked()
+        self._refuse_if_changed_on_disk()
         payload = json.dumps({"entries": {n: asdict(e) for n, e in self._entries.items()}})
         blob = crypto.encrypt(self._key, payload.encode("utf-8"), self._salt, self._params)
         atomic_write(self.path, blob)
+        self._disk_digest = hashlib.sha256(blob).digest()
 
     # ---- entries ---------------------------------------------------------------------------
 
@@ -165,8 +200,8 @@ class Vault:
             raise EntryExists(f"entry '{name}' already exists")
         now = int(time.time())
         entry = Entry(name=name, created=now, updated=now, **fields)
-        self._entries[name] = entry
-        self.save()
+        with self._transaction():
+            self._entries[name] = entry
         return replace(entry)
 
     def get(self, name: str) -> Entry:
@@ -185,17 +220,18 @@ class Vault:
             raise EntryNotFound(f"no entry named '{name}'")
         validate_entry_fields(**fields)
         entry = self._entries[name]
-        for key, value in fields.items():
-            setattr(entry, key, value)
-        entry.updated = int(time.time())
-        self.save()
+        with self._transaction():
+            for key, value in fields.items():
+                setattr(entry, key, value)
+            entry.updated = int(time.time())
         return replace(entry)
 
     def delete(self, name: str) -> None:
         self._require_unlocked()
-        if self._entries.pop(name, None) is None:
+        if name not in self._entries:
             raise EntryNotFound(f"no entry named '{name}'")
-        self.save()
+        with self._transaction():
+            del self._entries[name]
 
     def list_names(self) -> list[str]:
         self._require_unlocked()
@@ -242,28 +278,33 @@ class Vault:
                 url=incoming.url, notes=incoming.notes, totp=incoming.totp,
             )
         report, now = ImportReport(), int(time.time())
-        for incoming in entries:
-            name = incoming.name
-            if name in self._entries:
-                if on_conflict == "skip":
-                    report.skipped += 1
-                    continue
-                if on_conflict == "rename":
-                    name = self._unique_name(name)
-                    report.renamed += 1
-                    report.added += 1
+        snapshot = self._snapshot()
+        try:
+            for incoming in entries:
+                name = incoming.name
+                if name in self._entries:
+                    if on_conflict == "skip":
+                        report.skipped += 1
+                        continue
+                    if on_conflict == "rename":
+                        name = self._unique_name(name)
+                        report.renamed += 1
+                        report.added += 1
+                    else:
+                        report.overwritten += 1
                 else:
-                    report.overwritten += 1
-            else:
-                report.added += 1
-            self._entries[name] = replace(
-                incoming,
-                name=name,
-                created=incoming.created or now,
-                updated=incoming.updated or now,
-            )
-        if report.added or report.overwritten:
-            self.save()
+                    report.added += 1
+                self._entries[name] = replace(
+                    incoming,
+                    name=name,
+                    created=incoming.created or now,
+                    updated=incoming.updated or now,
+                )
+            if report.added or report.overwritten:
+                self.save()
+        except BaseException:
+            self._entries = snapshot
+            raise
         return report
 
     def _unique_name(self, base: str) -> str:

@@ -71,7 +71,7 @@ def fake_webview(monkeypatch):
 
 def test_run_app_opens_window_and_cleans_up(tmp_path, fake_webview):
     desktop.run_app(tmp_path / "v.bin")
-    assert fake_webview["title"] == "PasswordManager"
+    assert fake_webview["title"] == desktop.WINDOW_TITLE
     assert fake_webview["url"].startswith("http://127.0.0.1:")
     assert fake_webview["status_during_run"] == 200
     assert len(fake_webview["window"].events.minimized.handlers) == 1
@@ -88,3 +88,49 @@ def test_main_reports_missing_pywebview(tmp_path, monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "webview", None)  # makes `import webview` raise ImportError
     assert desktop.main(["--vault", str(tmp_path / "v.bin")]) == 1
     assert "pip install" in capsys.readouterr().err
+
+
+# ---- single instance ----------------------------------------------------------------------------
+
+
+class FakeInstance:
+    def __init__(self, first=True):
+        self.first, self.focused, self.released = first, [], 0
+
+    def acquire(self):
+        return self.first
+
+    def focus_existing(self, title):
+        self.focused.append(title)
+        return True
+
+    def release(self):
+        self.released += 1
+
+
+def test_a_second_launch_focuses_the_running_window_and_starts_nothing(tmp_path, fake_webview):
+    instance = FakeInstance(first=False)
+    assert desktop.run_app(tmp_path / "v.bin", single_instance=instance) is False
+    assert instance.focused == [desktop.WINDOW_TITLE]
+    assert "started" not in fake_webview and "title" not in fake_webview
+
+
+def test_the_first_launch_holds_the_lock_until_the_window_closes(tmp_path, fake_webview):
+    instance = FakeInstance()
+    assert desktop.run_app(tmp_path / "v.bin", single_instance=instance) is True
+    assert fake_webview["started"] and instance.released == 1
+
+
+def test_the_lock_is_released_even_if_the_window_crashes(tmp_path, fake_webview, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("webview failed")
+
+    monkeypatch.setattr(sys.modules["webview"], "start", boom)
+    instance = FakeInstance()
+    with pytest.raises(RuntimeError):
+        desktop.run_app(tmp_path / "v.bin", single_instance=instance)
+    assert instance.released == 1
+
+
+def test_window_title_is_not_a_plain_folder_name():
+    assert desktop.WINDOW_TITLE != "PasswordManager"

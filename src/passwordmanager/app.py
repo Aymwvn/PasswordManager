@@ -13,13 +13,17 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import uvicorn
-from fastapi import FastAPI
+from passwordmanager.singleton import SingleInstance, instance_name
 
-from passwordmanager.ui.server import create_app
+if TYPE_CHECKING:  # the heavy imports happen lazily so a second launch can exit quickly
+    import uvicorn
+    from fastapi import FastAPI
 
-WINDOW_TITLE = "PasswordManager"
+# Deliberately not just "PasswordManager": a File Explorer window for a folder with that name has
+# exactly that title, and the second launch finds the running window by its exact title.
+WINDOW_TITLE = "PasswordManager - Local Vault"
 
 
 def default_vault_path() -> Path:
@@ -52,6 +56,10 @@ class RunningServer:
 def start_server(
     vault_path: str | Path, auto_lock_seconds: int = 300, startup_timeout: float = 10.0
 ) -> RunningServer:
+    import uvicorn
+
+    from passwordmanager.ui.server import create_app
+
     port = _free_port()
     allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
     app = create_app(vault_path, allowed_hosts=allowed, auto_lock_seconds=auto_lock_seconds)
@@ -73,22 +81,33 @@ def run_app(
     vault_path: str | Path,
     auto_lock_seconds: int = 300,
     lock_on_minimize: bool = True,
-) -> None:
-    import webview  # imported late so the rest of the package works without pywebview
-
-    srv = start_server(vault_path, auto_lock_seconds)
+    single_instance: SingleInstance | None = None,
+) -> bool:
+    """Open the app. Returns False if one was already running for this vault; in that case its
+    window is brought to the front and nothing else starts."""
+    instance = single_instance or SingleInstance(instance_name(vault_path))
+    if not instance.acquire():
+        instance.focus_existing(WINDOW_TITLE)
+        return False
     try:
-        window = webview.create_window(
-            WINDOW_TITLE, srv.url, width=1100, height=720, min_size=(820, 540)
-        )
-        if lock_on_minimize:
-            try:
-                window.events.minimized += srv.app.state.session.lock
-            except AttributeError:  # older pywebview without the minimized event
-                pass
-        webview.start()
+        import webview  # imported late so the rest of the package works without pywebview
+
+        srv = start_server(vault_path, auto_lock_seconds)
+        try:
+            window = webview.create_window(
+                WINDOW_TITLE, srv.url, width=1100, height=720, min_size=(820, 540)
+            )
+            if lock_on_minimize:
+                try:
+                    window.events.minimized += srv.app.state.session.lock
+                except AttributeError:  # older pywebview without the minimized event
+                    pass
+            webview.start()
+        finally:
+            srv.stop()
     finally:
-        srv.stop()
+        instance.release()
+    return True
 
 
 def _fatal(message: str) -> None:
