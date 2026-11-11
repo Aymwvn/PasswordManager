@@ -287,7 +287,9 @@ def test_arbitrary_text_as_csv_never_crashes_and_never_yields_bad_entries(text):
     _assert_clean(entries)
 
 
-cell = st.text(max_size=700)
+# csv.writer on Python 3.10 refuses to write a NUL ("need to escape"); 3.11+ accepts it. NULs in
+# the *reader* are covered by test_arbitrary_text_as_csv_never_crashes... (raw text, no writer).
+cell = st.text(st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00"), max_size=700)
 
 
 @FUZZ
