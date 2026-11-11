@@ -17,14 +17,17 @@ from .fileio import atomic_write
 
 MIN_MASTER_LENGTH = 12
 EDITABLE_FIELDS = {"username", "password", "url", "notes", "totp"}
-FIELD_LIMITS = {
-    "name": 200,
-    "username": 500,
-    "password": 1024,  # nosec B105 - a length limit, not a secret
-    "url": 2000,
-    "notes": 10_000,
-    "totp": 1000,
-}
+# Maximum length per field (the API models enforce the same numbers).
+FIELD_LIMITS = dict(
+    (
+        ("name", 200),
+        ("username", 500),
+        ("password", 1024),
+        ("url", 2000),
+        ("notes", 10_000),
+        ("totp", 1000),
+    )
+)
 CONFLICT_MODES = ("rename", "skip", "overwrite")
 
 

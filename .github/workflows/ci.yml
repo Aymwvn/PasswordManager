@@ -32,5 +32,11 @@ jobs:
       - run: pip install -e ".[dev]"
       - name: Static analysis (bandit)
         run: bandit -r src -q
-      - name: Dependency audit
-        run: pip-audit
+      - name: Audit the app's runtime dependencies
+        # Audit what ships to users (the app + its dependencies) in a clean environment.
+        # Auditing the CI runner itself flags the runner's own pip/setuptools and the dev tools,
+        # which says nothing about the app and makes this job fail for reasons we don't control.
+        run: |
+          python -m venv --without-pip audit-env
+          python -m pip --python audit-env/bin/python install ".[ui,app]"
+          pip-audit --path audit-env/lib/python*/site-packages
