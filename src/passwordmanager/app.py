@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from passwordmanager.singleton import SingleInstance, instance_name
+from passwordmanager.winicon import ICON_PATH, set_app_user_model_id, set_window_icon
 
 if TYPE_CHECKING:  # the heavy imports happen lazily so a second launch can exit quickly
     import uvicorn
@@ -24,6 +25,15 @@ if TYPE_CHECKING:  # the heavy imports happen lazily so a second launch can exit
 # Deliberately not just "PasswordManager": a File Explorer window for a folder with that name has
 # exactly that title, and the second launch finds the running window by its exact title.
 WINDOW_TITLE = "PasswordManager - Local Vault"
+
+
+def _apply_window_icon() -> None:
+    """Runs on pywebview's helper thread once the GUI loop is up: wait for the native window to
+    exist (up to ~5 s), then give it our icon."""
+    for _ in range(20):
+        if set_window_icon(WINDOW_TITLE, ICON_PATH):
+            return
+        time.sleep(0.25)
 
 
 def default_vault_path() -> Path:
@@ -94,6 +104,7 @@ def run_app(
 
         srv = start_server(vault_path, auto_lock_seconds)
         try:
+            set_app_user_model_id()  # own taskbar identity, so our icon is used, not Python's
             window = webview.create_window(
                 WINDOW_TITLE, srv.url, width=1100, height=720, min_size=(820, 540)
             )
@@ -102,7 +113,7 @@ def run_app(
                     window.events.minimized += srv.app.state.session.lock
                 except AttributeError:  # older pywebview without the minimized event
                     pass
-            webview.start()
+            webview.start(_apply_window_icon)
         finally:
             srv.stop()
     finally:

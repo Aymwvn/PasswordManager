@@ -1,5 +1,7 @@
 @echo off
-REM Creates a Start Menu shortcut for PasswordManager with the hotkey Ctrl+Alt+P.
+REM Creates PasswordManager shortcuts with the app icon:
+REM   - Start Menu, with the hotkey Ctrl+Alt+P
+REM   - Desktop
 REM (Windows only allows Ctrl+Alt+<key> for shortcut hotkeys; for Win+Alt+P see docs\SHORTCUTS.md.)
 setlocal
 set "ROOT=%~dp0.."
@@ -12,12 +14,16 @@ if not exist "%TARGET%" (
 )
 set "LNK=%APPDATA%\Microsoft\Windows\Start Menu\Programs\PasswordManager.lnk"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK);" ^
-  "$s.TargetPath = $env:TARGET; $s.WorkingDirectory = $env:ROOT;" ^
-  "$s.IconLocation = $env:ROOT + '\assets\icon.ico'; $s.Hotkey = 'CTRL+ALT+P';" ^
-  "$s.Description = 'PasswordManager'; $s.Save()"
+  "$sh = New-Object -ComObject WScript.Shell;" ^
+  "$desk = [Environment]::GetFolderPath('Desktop') + '\PasswordManager.lnk';" ^
+  "foreach ($p in @($env:LNK, $desk)) {" ^
+  "  $s = $sh.CreateShortcut($p);" ^
+  "  $s.TargetPath = $env:TARGET; $s.WorkingDirectory = $env:ROOT;" ^
+  "  $s.IconLocation = $env:ROOT + '\assets\icon.ico'; $s.Description = 'PasswordManager';" ^
+  "  if ($p -eq $env:LNK) { $s.Hotkey = 'CTRL+ALT+P' };" ^
+  "  $s.Save(); Write-Host ('Created: ' + $p) }"
 if errorlevel 1 exit /b 1
 echo.
-echo Created: %LNK%
 echo Target : %TARGET%
-echo Press Ctrl+Alt+P to open PasswordManager, or find it by typing its name in the Start menu.
+echo Press Ctrl+Alt+P to open PasswordManager, double-click the Desktop icon, or search for it in Start.
+echo If an old icon still shows, run:  ie4uinit.exe -show

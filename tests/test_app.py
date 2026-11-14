@@ -56,16 +56,21 @@ def fake_webview(monkeypatch):
         calls["window"] = window
         return window
 
-    def start(*_a, **_k):
+    def start(func=None, *_a, **_k):
         calls["started"] = True
+        calls["start_func"] = func
         with urllib.request.urlopen(calls["url"] + "api/status", timeout=5) as res:  # noqa: S310
             calls["status_during_run"] = res.status
         calls["window"].events.minimized.fire()  # simulate the user minimizing the window
+        if func is not None:
+            func()  # pywebview runs this on a helper thread once the window exists
 
     module = types.ModuleType("webview")
     module.create_window = create_window
     module.start = start
     monkeypatch.setitem(sys.modules, "webview", module)
+    monkeypatch.setattr(desktop, "set_app_user_model_id", lambda *a, **k: calls.setdefault("app_id", True))
+    monkeypatch.setattr(desktop, "set_window_icon", lambda *a, **k: calls.setdefault("icon_args", a) and True)
     return calls
 
 
@@ -134,3 +139,28 @@ def test_the_lock_is_released_even_if_the_window_crashes(tmp_path, fake_webview,
 
 def test_window_title_is_not_a_plain_folder_name():
     assert desktop.WINDOW_TITLE != "PasswordManager"
+
+
+# ---- window icon ----------------------------------------------------------------------------------
+
+
+def test_the_window_gets_our_icon_and_its_own_taskbar_identity(tmp_path, fake_webview):
+    desktop.run_app(tmp_path / "v.bin")
+    assert fake_webview["app_id"] is True
+    assert fake_webview["start_func"] is desktop._apply_window_icon
+    title, path = fake_webview["icon_args"]
+    assert title == desktop.WINDOW_TITLE and path.name == "icon.ico"
+
+
+def test_icon_helper_retries_until_the_window_exists(monkeypatch):
+    attempts = []
+    monkeypatch.setattr(desktop, "set_window_icon", lambda *a, **k: attempts.append(a) or len(attempts) >= 3)
+    monkeypatch.setattr(desktop.time, "sleep", lambda _s: None)
+    desktop._apply_window_icon()
+    assert len(attempts) == 3
+
+
+def test_icon_helper_gives_up_quietly(monkeypatch):
+    monkeypatch.setattr(desktop, "set_window_icon", lambda *a, **k: False)
+    monkeypatch.setattr(desktop.time, "sleep", lambda _s: None)
+    desktop._apply_window_icon()  # must simply return, never raise or hang
